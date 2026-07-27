@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign up · WSWRTB</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="/static/js/theme.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <span class="brand">WSWRTB</span>
+      <button id="theme-toggle" class="ghost" type="button">Theme</button>
+    </header>
+
+    <h1>Join your book club</h1>
+    <p class="subtitle">You'll need the invite code your club organizer gave you.</p>
+
+    <form id="signup-form" class="card" novalidate>
+      <label for="display_name">Display name</label>
+      <input id="display_name" name="display_name" type="text" autocomplete="name" required maxlength="80" />
+
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="email" required maxlength="254" />
+
+      <label for="password">Password <span class="hint">(at least 8 characters)</span></label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required minlength="8" maxlength="200" />
+
+      <label for="invite_code">Invite code</label>
+      <input id="invite_code" name="invite_code" type="text" required maxlength="64" placeholder="e.g. NIGHTOWLS-2026" />
+
+      <button class="primary" type="submit">Create account</button>
+      <div id="msg" class="msg"></div>
+    </form>
+
+    <p class="foot">Already have an account? <a href="/login">Log in</a></p>
+  </div>
+  <script src="/static/js/signup.js"></script>
+</body>
+</html>

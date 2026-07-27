@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Your reading profile · WSWRTB</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="/static/js/theme.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <span class="brand">WSWRTB</span>
+      <div>
+        <button id="theme-toggle" class="ghost" type="button">Theme</button>
+        <button id="logout" class="ghost" type="button">Log out</button>
+      </div>
+    </header>
+
+    <h1>Your reading profile</h1>
+    <p class="subtitle" id="greeting">Tell us what you love — it shapes your recommendations.</p>
+
+    <form id="profile-form" class="card" novalidate>
+      <label for="favorite_genres">Favorite genres
+        <span class="hint">— comma separated (e.g. sci-fi, mystery, literary fiction)</span>
+      </label>
+      <textarea id="favorite_genres" placeholder="sci-fi, historical fiction, thrillers"></textarea>
+
+      <label for="favorite_authors">Favorite authors
+        <span class="hint">— comma separated</span>
+      </label>
+      <textarea id="favorite_authors" placeholder="Ursula K. Le Guin, Tana French"></textarea>
+
+      <label for="examples">Books you've loved
+        <span class="hint">— comma separated</span>
+      </label>
+      <textarea id="examples" placeholder="The Left Hand of Darkness, Project Hail Mary"></textarea>
+
+      <label for="dislikes">Turn-offs / dislikes
+        <span class="hint">— genres, themes, or authors to avoid</span>
+      </label>
+      <textarea id="dislikes" placeholder="gratuitous gore, cliffhanger endings"></textarea>
+
+      <fieldset>
+        <legend>Content comfort</legend>
+        <div class="row">
+          <div>
+            <label for="max_violence">Max violence</label>
+            <select id="max_violence">
+              <option value="none">None</option>
+              <option value="mild">Mild</option>
+              <option value="moderate">Moderate</option>
+              <option value="graphic">Graphic</option>
+            </select>
+          </div>
+          <div>
+            <label for="max_language">Max language</label>
+            <select id="max_language">
+              <option value="none">None</option>
+              <option value="mild">Mild</option>
+              <option value="moderate">Moderate</option>
+              <option value="graphic">Graphic</option>
+            </select>
+          </div>
+        </div>
+        <label class="check"><input id="romance_ok" type="checkbox" /> Romance is welcome</label>
+        <label class="check"><input id="explicit_ok" type="checkbox" /> Explicit content is OK</label>
+      </fieldset>
+
+      <div class="row">
+        <div>
+          <label for="reading_pace">Reading pace</label>
+          <select id="reading_pace">
+            <option value="">No preference</option>
+            <option value="fast">Fast — I devour books</option>
+            <option value="slow">Slow — I savor them</option>
+          </select>
+        </div>
+        <div>
+          <label for="preferred_length">Preferred length</label>
+          <select id="preferred_length">
+            <option value="">No preference</option>
+            <option value="short">Short</option>
+            <option value="medium">Medium</option>
+            <option value="long">Long</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="primary" type="submit">Save profile</button>
+      <div id="msg" class="msg"></div>
+    </form>
+  </div>
+  <script src="/static/js/profile.js"></script>
+</body>
+</html>
