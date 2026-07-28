@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -62,9 +62,9 @@ async def root() -> RedirectResponse:
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon() -> FileResponse | JSONResponse:
-    """Serve a favicon if present, else 204-ish empty JSON to keep logs quiet."""
+async def favicon() -> Response:
+    """Serve a favicon if present, else a 204 to keep request logs quiet."""
     ico = STATIC_DIR / "favicon.ico"
     if ico.exists():
         return FileResponse(str(ico))
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)

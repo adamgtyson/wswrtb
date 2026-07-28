@@ -7,6 +7,7 @@ never interpolate values into a query string.
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -141,20 +142,29 @@ def format_ts(dt: datetime) -> str:
     return dt.strftime(_TS_FORMAT)
 
 
-async def connect() -> aiosqlite.Connection:
-    """Open a connection with foreign-key enforcement enabled.
+@asynccontextmanager
+async def connect(isolation_level: str | None = ""):
+    """Async context manager yielding a connection with foreign keys enforced.
 
-    Caller is responsible for closing (use `async with await connect() as db:`).
+    Usage: `async with connect() as db: ...`. The connection is closed on exit.
+
+    `isolation_level` is passed to the underlying driver at creation time so it is
+    set on the correct worker thread. Pass ``None`` for manual transaction control
+    (explicit BEGIN/COMMIT/ROLLBACK); the default "" keeps sqlite3's legacy
+    autocommit-with-implicit-transactions behavior used by the simple query helpers.
     """
-    db = await aiosqlite.connect(DB_PATH)
-    await db.execute("PRAGMA foreign_keys = ON")
-    return db
+    db = await aiosqlite.connect(DB_PATH, isolation_level=isolation_level)
+    try:
+        await db.execute("PRAGMA foreign_keys = ON")
+        yield db
+    finally:
+        await db.close()
 
 
 async def init_db() -> None:
     """Create every table if it does not already exist. Raises RuntimeError on failure."""
     try:
-        async with await connect() as db:
+        async with connect() as db:
             for ddl in _TABLES:
                 await db.execute(ddl)
             await db.commit()
@@ -168,7 +178,7 @@ async def init_db() -> None:
 # ---------------------------------------------------------------------------
 async def get_user_by_email(email: str) -> dict | None:
     """Return {id, email, display_name, password_hash} for an email, or None."""
-    async with await connect() as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT id, email, display_name, password_hash FROM users WHERE email = ?",
             (email,),
@@ -181,7 +191,7 @@ async def get_user_by_email(email: str) -> dict | None:
 
 async def get_user_by_id(user_id: int) -> dict | None:
     """Return {id, email, display_name} for a user id, or None."""
-    async with await connect() as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT id, email, display_name FROM users WHERE id = ?",
             (user_id,),
@@ -197,7 +207,7 @@ async def get_user_by_id(user_id: int) -> dict | None:
 # ---------------------------------------------------------------------------
 async def get_profile(user_id: int) -> dict | None:
     """Return the full preference profile for a user (JSON columns parsed), or None."""
-    async with await connect() as db:
+    async with connect() as db:
         async with db.execute(
             """SELECT email, display_name, favorite_genres, favorite_authors, examples,
                       dislikes, content_preferences, reading_pace, preferred_length
@@ -231,7 +241,7 @@ async def update_profile(
     preferred_length: str | None,
 ) -> None:
     """Persist a validated preference profile to the user's row (JSON as strings)."""
-    async with await connect() as db:
+    async with connect() as db:
         await db.execute(
             """UPDATE users SET
                  favorite_genres = ?, favorite_authors = ?, examples = ?, dislikes = ?,
@@ -256,7 +266,7 @@ async def update_profile(
 # ---------------------------------------------------------------------------
 async def is_member(user_id: int, group_id: int) -> bool:
     """Return True if the user has a membership row for the group."""
-    async with await connect() as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT 1 FROM memberships WHERE user_id = ? AND group_id = ?",
             (user_id, group_id),
@@ -266,7 +276,7 @@ async def is_member(user_id: int, group_id: int) -> bool:
 
 async def get_group(group_id: int) -> dict | None:
     """Return {id, name, type, owner_user_id} for a group, or None."""
-    async with await connect() as db:
+    async with connect() as db:
         async with db.execute(
             "SELECT id, name, type, owner_user_id FROM groups WHERE id = ?",
             (group_id,),
@@ -297,8 +307,7 @@ async def create_owner_group_and_invite(
     Runs in a single transaction. Raises aiosqlite.IntegrityError if the email or
     code already exists (UNIQUE violation). Returns the created ids.
     """
-    async with await connect() as db:
-        db.isolation_level = None  # take manual control of the transaction
+    async with connect(isolation_level=None) as db:  # manual transaction control
         await db.execute("BEGIN IMMEDIATE")
         try:
             cur = await db.execute(
