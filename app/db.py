@@ -23,6 +23,11 @@ DB_PATH = Path(os.environ["WSWRTB_DB_PATH"]) if os.environ.get("WSWRTB_DB_PATH")
 # so string comparison in SQL (expires_at > ?) behaves like chronological comparison.
 _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 
+# Membership roles. A group has exactly one owner (matching groups.owner_user_id);
+# everyone else is a member.
+ROLE_OWNER = "owner"
+ROLE_MEMBER = "member"
+
 # ---------------------------------------------------------------------------
 # Schema — active tables (Session 1) followed by forward-declared tables.
 # ---------------------------------------------------------------------------
@@ -285,6 +290,130 @@ async def get_group(group_id: int) -> dict | None:
     if row is None:
         return None
     return {"id": row[0], "name": row[1], "type": row[2], "owner_user_id": row[3]}
+
+
+async def get_role(user_id: int, group_id: int) -> str | None:
+    """Return the user's role in the group (ROLE_OWNER/ROLE_MEMBER), or None if not a member."""
+    async with connect() as db:
+        async with db.execute(
+            "SELECT role FROM memberships WHERE user_id = ? AND group_id = ?",
+            (user_id, group_id),
+        ) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def list_user_groups(user_id: int) -> list[dict]:
+    """Return the groups a user belongs to as {id, name, type, role}, ordered by name."""
+    async with connect() as db:
+        async with db.execute(
+            """SELECT g.id, g.name, g.type, m.role
+               FROM memberships m JOIN groups g ON g.id = m.group_id
+               WHERE m.user_id = ?
+               ORDER BY g.name, g.id""",
+            (user_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [{"id": r[0], "name": r[1], "type": r[2], "role": r[3]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Group member management (Session 2)
+# ---------------------------------------------------------------------------
+async def list_members(group_id: int) -> list[dict]:
+    """Return a group's members as {user_id, display_name, email, role, joined_at}.
+
+    Ordered by join time (the owner, created first, sorts first). Email is included at
+    the DB layer; routes decide whether to expose it (owners only).
+    """
+    async with connect() as db:
+        async with db.execute(
+            """SELECT u.id, u.display_name, u.email, m.role, m.created_at
+               FROM memberships m JOIN users u ON u.id = m.user_id
+               WHERE m.group_id = ?
+               ORDER BY m.created_at, u.id""",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {"user_id": r[0], "display_name": r[1], "email": r[2], "role": r[3], "joined_at": r[4]}
+        for r in rows
+    ]
+
+
+async def remove_membership(user_id: int, group_id: int) -> bool:
+    """Delete a user's membership in a group. Returns True if a row was removed.
+
+    Only the membership link is deleted — the user's account and profile are untouched,
+    so they simply lose access to this one group.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            "DELETE FROM memberships WHERE user_id = ? AND group_id = ?",
+            (user_id, group_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Invite-code management (Session 2)
+# ---------------------------------------------------------------------------
+async def list_invite_codes(group_id: int) -> list[dict]:
+    """Return all invite codes for a group, newest first, with seat accounting."""
+    async with connect() as db:
+        async with db.execute(
+            """SELECT id, code, max_redemptions, redemption_count, active, created_at, expires_at
+               FROM invite_codes WHERE group_id = ?
+               ORDER BY created_at DESC, id DESC""",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "id": r[0],
+            "code": r[1],
+            "max_redemptions": r[2],
+            "redemption_count": r[3],
+            "active": r[4],
+            "created_at": r[5],
+            "expires_at": r[6],
+        }
+        for r in rows
+    ]
+
+
+async def create_invite_code(
+    group_id: int, code: str, created_by_user_id: int, max_redemptions: int
+) -> dict:
+    """Insert a new active invite code for a group. Returns {id, code}.
+
+    Raises aiosqlite.IntegrityError if the code already exists (UNIQUE violation).
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            """INSERT INTO invite_codes (group_id, code, created_by_user_id, max_redemptions)
+               VALUES (?, ?, ?, ?)""",
+            (group_id, code, created_by_user_id, max_redemptions),
+        )
+        await db.commit()
+        return {"id": cur.lastrowid, "code": code}
+
+
+async def deactivate_invite_code(group_id: int, code_id: int) -> bool:
+    """Force a code inactive (active = 0), independent of remaining seats.
+
+    Returns True if the code belongs to the group (deactivating an already-inactive
+    code is a harmless no-op that still returns True); False if no such code exists in
+    the group. Scoping the UPDATE by group_id prevents cross-tenant deactivation.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            "UPDATE invite_codes SET active = 0 WHERE id = ? AND group_id = ?",
+            (code_id, group_id),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 # ---------------------------------------------------------------------------
