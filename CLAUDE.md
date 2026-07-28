@@ -100,21 +100,57 @@ single-use `invites` table. One invite code maps to one group.
 
 ## Current Build State
 
-_Session 1 — see the end of this file; overwrite each session._
+_Session 1 complete — Scaffold + Code-Gated Onboarding vertical slice._
 
-Nothing built yet beyond this scaffold.
+Built and passing (20 tests, 89% coverage):
+
+- **Auth** (`app/auth.py`): bcrypt via passlib, HS256 JWT in an httpOnly + SameSite=Lax
+  cookie (`session`), `Secure` gated on `ENVIRONMENT`, 7-day expiry, `JWT_SECRET` from
+  `.env` (min 32 chars). `get_current_user` dependency; `NeedsLoginException` handled
+  globally (401 JSON on `/api/`, redirect to `/login` on pages).
+- **DB** (`app/db.py`): full schema via `CREATE TABLE IF NOT EXISTS` (active: users,
+  groups, memberships, invite_codes, invite_redemptions; the rest forward-declared).
+  `connect()` is an `@asynccontextmanager` enforcing `PRAGMA foreign_keys = ON`; it
+  takes `isolation_level` at creation time so manual-transaction callers set it on
+  aiosqlite's worker thread. All SQL parameterized.
+- **Code-gated registration** (`app/services/invites.py`): public signup disabled;
+  requires email + password + display_name + invite_code. One atomic transaction
+  (`BEGIN IMMEDIATE`, conditional `UPDATE ... RETURNING` consumes the seat first, then
+  user/membership/redemption inserts; any failure rolls back and releases the seat).
+  `active` flips to 0 at the cap. Generic error on every failure.
+- **Authorization** (`app/deps.py`): `require_membership(...)` factory; wired onto
+  `GET /api/groups/{group_id}` (403 non-member, 401 unauth, 404 unknown group).
+- **Profile** (`app/routes/profile_routes.py`, `app/models.py`): structured builder
+  (genres/authors/examples/dislikes lists, content_preferences, reading_pace,
+  preferred_length) persisted as JSON columns on `users`; round-trips across
+  logout/login. Pydantic validation on every input.
+- **Seed script** (`scripts/seed_group.py`): creates owner + group + owner membership +
+  seat-limited invite code; `--code` normalized/validated (4–32 chars, letters/digits/
+  hyphens), random if omitted.
+- **Frontend** (`static/`): vanilla signup/login/profile pages, mobile-first, 680px
+  centered, dark/light toggle in localStorage.
+- **DoD verified**: seeded an 8-seat code, 8 members registered (201), the 9th refused
+  (400); lowercase codes normalize; profile persists across logout/login; no-code
+  registration impossible.
 
 ---
 
 ## Pending / on the horizon
 
-- Session 2: owner/admin member-management UI (create/rotate codes, view seats, remove
-  members) — not just the seed script.
+- **Next (Session 2):** owner/admin member-management UI (create/rotate codes, view
+  seats, remove members) — not just the seed script.
 - Session 3: metered Claude service (cost controls, `ai_usage` accounting) — the
   prerequisite for the conversational profile-discovery layer.
 - Later: recommendation engine, Google Books integration, voting rounds/ballots,
   reading lists, cross-group matching, flags review.
 - Not yet: password reset, email verification, Stripe/billing, managed auth (Clerk).
+
+**Housekeeping noticed this session (not blocking):**
+- `pytest-cov` is used for the coverage report but is not in `requirements.txt` (which
+  pins production deps only). Add a `requirements-dev.txt` if/when coverage becomes part
+  of CI.
+- `session1_summary.txt` is a stray scratch file in the repo root (left untracked, not
+  committed). Delete it when convenient.
 
 ---
 
