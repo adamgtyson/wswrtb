@@ -7,6 +7,7 @@ blocks and then re-reads the decremented count). Any failure rolls back the whol
 so a rejected registration never consumes a seat.
 """
 import re
+import secrets
 
 import aiosqlite
 
@@ -14,6 +15,18 @@ from app import auth, db
 
 # Codes are normalized to uppercase; letters, digits, and hyphens only, 4–32 chars.
 _CODE_RE = re.compile(r"^[A-Z0-9-]{4,32}$")
+
+# Random codes are 10 uppercase hex chars — comfortably inside the 4–32 range.
+_RANDOM_CODE_BYTES = 5
+
+
+def generate_code() -> str:
+    """Generate a random, human-typable invite code (uppercase hex, 10 chars).
+
+    Shared home for random-code generation so the in-app owner tooling and the seed
+    script produce codes the same way.
+    """
+    return secrets.token_hex(_RANDOM_CODE_BYTES).upper()
 
 
 class InviteError(Exception):
@@ -53,8 +66,7 @@ async def redeem_and_register(
     password_hash = auth.hash_password(password)
     now = db.utcnow_str()
 
-    async with await db.connect() as conn:
-        conn.isolation_level = None  # manual transaction control
+    async with db.connect(isolation_level=None) as conn:  # manual transaction control
         await conn.execute("BEGIN IMMEDIATE")
         try:
             # Consume a seat FIRST. The WHERE clause enforces active / not-expired /

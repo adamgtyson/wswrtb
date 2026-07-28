@@ -16,6 +16,10 @@ _MAX_LIST_ITEMS = 50
 _MAX_ITEM_LEN = 200
 _CONTENT_LEVELS = ("none", "mild", "moderate", "graphic")
 
+# Invite-code seat bounds for owner-created codes.
+_MIN_SEATS = 1
+_MAX_SEATS = 200
+
 
 def _clean_string_list(value: list) -> list[str]:
     """Strip, drop empties, enforce per-item length and list-length caps."""
@@ -114,3 +118,28 @@ class ProfileResponse(BaseModel):
     content_preferences: ContentPreferences
     reading_pace: Optional[str] = None
     preferred_length: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Invite-code management (Session 2)
+# ---------------------------------------------------------------------------
+class InviteCodeCreate(BaseModel):
+    """Owner-supplied parameters for a new invite code.
+
+    `code` is optional (a random code is generated when omitted). A supplied code's
+    shape (4–32 chars, letters/digits/hyphens, normalized) is validated server-side by
+    the shared invites helper — the same rules seed_group.py uses — so only a light
+    length bound is enforced here. `max_redemptions` is the seat count.
+    """
+
+    code: Optional[str] = Field(default=None, max_length=64)
+    max_redemptions: int = Field(..., ge=_MIN_SEATS, le=_MAX_SEATS)
+
+    @field_validator("code")
+    @classmethod
+    def _blank_to_none(cls, v: Optional[str]) -> Optional[str]:
+        """Treat a blank/whitespace code as omitted (-> random)."""
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None

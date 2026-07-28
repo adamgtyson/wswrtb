@@ -66,10 +66,12 @@ async def put_profile(
     tags=["groups"],
 )
 async def get_group(ctx: dict = Depends(require_membership())) -> dict:
-    """Return basic group info. Protected by require_membership — 403 for non-members.
+    """Return basic group info plus the current user's role in it. Protected by
+    require_membership — 403 for non-members.
 
-    This proves the authorization pattern later sessions reuse for every group-scoped
-    route.
+    The role lets the group page decide whether to render owner controls. This route
+    keeps its original authorization behavior; only the response was extended.
     """
     group = await db.get_group(ctx["group_id"])
-    return {"id": group["id"], "name": group["name"], "type": group["type"]}
+    role = await db.get_role(ctx["user"]["id"], ctx["group_id"])
+    return {"id": group["id"], "name": group["name"], "type": group["type"], "role": role}
