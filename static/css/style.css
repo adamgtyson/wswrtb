@@ -147,3 +147,37 @@ a { color: var(--accent); }
 .msg.ok { background: rgba(46, 125, 50, 0.12); color: var(--ok); border: 1px solid var(--ok); }
 
 .foot { text-align: center; margin-top: 18px; color: var(--muted); font-size: 0.92rem; }
+
+/* --- Group management (Session 2) --- */
+.navlink { align-self: center; text-decoration: none; font-size: 0.9rem; color: var(--accent); }
+.hidden { display: none !important; }
+
+.section-title { margin: 26px 0 0; font-size: 1.15rem; }
+
+.list { list-style: none; margin: 8px 0 0; padding: 0; }
+.list li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.list li:last-child { border-bottom: none; }
+.list .meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.list .name { font-weight: 600; overflow-wrap: anywhere; }
+.list .sub { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
+.list .actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+
+.pill { font-size: 0.72rem; font-weight: 700; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.pill.owner { color: var(--accent); border-color: var(--accent); }
+.pill.on { color: var(--ok); border-color: var(--ok); }
+.pill.off { color: var(--muted); }
+
+button.small { padding: 7px 12px; font-size: 0.9rem; }
+button.danger {
+  background: transparent; color: var(--danger); border: 1px solid var(--danger);
+  padding: 7px 12px; font-size: 0.9rem;
+}
+button.danger:hover { filter: brightness(1.05); }
+
+.inline-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; margin-top: 8px; }
+.inline-form > div { flex: 1 1 150px; }
+.inline-form label { margin: 0 0 6px; }
+.inline-form button { flex: 0 0 auto; }

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Your group · WSWRTB</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="/static/js/theme.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <span class="brand">WSWRTB</span>
+      <div>
+        <a class="navlink" href="/profile">Profile</a>
+        <button id="theme-toggle" class="ghost" type="button">Theme</button>
+        <button id="logout" class="ghost" type="button">Log out</button>
+      </div>
+    </header>
+
+    <h1 id="group-name">Your group</h1>
+    <p class="subtitle" id="group-sub">Members and, if you're the owner, invite codes.</p>
+
+    <!-- Shown only when the user belongs to more than one group. -->
+    <div id="group-picker-wrap" class="hidden">
+      <label for="group-picker">Group</label>
+      <select id="group-picker"></select>
+    </div>
+
+    <div id="page-msg" class="msg"></div>
+
+    <!-- Roster -->
+    <section class="card" id="roster-card">
+      <h2 class="section-title" style="margin-top:0;">Members</h2>
+      <ul class="list" id="member-list"></ul>
+    </section>
+
+    <!-- Owner-only: invite-code management -->
+    <section class="card owner-only hidden" id="codes-card">
+      <h2 class="section-title" style="margin-top:0;">Invite codes</h2>
+      <ul class="list" id="code-list"></ul>
+
+      <h3 class="section-title">Create a new code</h3>
+      <form id="create-code-form" class="inline-form" novalidate>
+        <div>
+          <label for="new-code">Custom code <span class="hint">(optional)</span></label>
+          <input id="new-code" type="text" placeholder="e.g. WAVE2-2026" maxlength="32" />
+        </div>
+        <div>
+          <label for="new-seats">Seats</label>
+          <input id="new-seats" type="number" min="1" max="200" value="8" />
+        </div>
+        <button class="primary small" type="submit" style="width:auto;margin-top:0;">Create code</button>
+      </form>
+      <div id="code-msg" class="msg"></div>
+    </section>
+  </div>
+
+  <script src="/static/js/group.js"></script>
+</body>
+</html>
