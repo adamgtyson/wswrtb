@@ -18,6 +18,7 @@ from app import db
 from app.auth import get_current_user
 from app.deps import require_membership, require_owner
 from app.models import InviteCodeCreate
+from app.services import rate_limit
 from app.services.invites import generate_code, normalize_and_validate_code
 
 router = APIRouter()
@@ -129,7 +130,15 @@ async def create_group_invite_code(
 ) -> dict:
     """Create a new active invite code for the group. Uses the shared normalization
     helper for a supplied code (identical rules to seed_group.py); generates a random
-    code when none is supplied. Multiple simultaneously-active codes are allowed."""
+    code when none is supplied. Multiple simultaneously-active codes are allowed.
+
+    Rate-limited by owner user id (in addition to the require_owner gate) to cap runaway
+    code creation."""
+    await rate_limit.check_and_record(
+        f"invite_create:{ctx['user']['id']}",
+        rate_limit.INVITE_CREATE_LIMIT,
+        rate_limit.INVITE_CREATE_WINDOW_SECONDS,
+    )
     if body.code is None:
         code = generate_code()
     else:

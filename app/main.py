@@ -14,6 +14,7 @@ from app.auth import COOKIE_NAME, NeedsLoginException
 from app.routes.auth_routes import router as auth_router
 from app.routes.group_routes import router as group_router
 from app.routes.profile_routes import router as profile_router
+from app.services.rate_limit import RateLimitError
 
 load_dotenv()
 
@@ -42,6 +43,15 @@ async def handle_needs_login(request: Request, exc: NeedsLoginException):
     response = RedirectResponse(url="/login", status_code=302)
     response.delete_cookie(COOKIE_NAME)
     return response
+
+
+@app.exception_handler(RateLimitError)
+async def handle_rate_limit(request: Request, exc: RateLimitError):
+    """Map a tripped rate limit to a generic HTTP 429 (no timing/quota detail leaked)."""
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests. Please slow down and try again later."},
+    )
 
 
 app.include_router(auth_router)

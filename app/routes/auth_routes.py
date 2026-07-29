@@ -5,11 +5,12 @@ failures return a generic message so no single failing condition is leaked.
 """
 from pathlib import Path
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Request, status
 from fastapi.responses import FileResponse, JSONResponse
 
 from app import auth, db
 from app.models import LoginRequest, RegisterRequest
+from app.services import rate_limit
 from app.services.invites import InviteError, redeem_and_register
 
 router = APIRouter()
@@ -54,8 +55,18 @@ async def login_page() -> FileResponse:
     ),
     tags=["auth"],
 )
-async def register(body: RegisterRequest) -> JSONResponse:
-    """Create an account by redeeming an invite code, then log the user in."""
+async def register(body: RegisterRequest, request: Request) -> JSONResponse:
+    """Create an account by redeeming an invite code, then log the user in.
+
+    Rate-limited by client IP before any work — this is the pre-auth endpoint where
+    invite-code guessing would happen. A RateLimitError propagates to the global 429
+    handler.
+    """
+    await rate_limit.check_and_record(
+        f"register:{rate_limit.client_ip(request)}",
+        rate_limit.REGISTER_LIMIT,
+        rate_limit.REGISTER_WINDOW_SECONDS,
+    )
     try:
         result = await redeem_and_register(
             email=body.email,
@@ -81,8 +92,16 @@ async def register(body: RegisterRequest) -> JSONResponse:
     summary="Log in with email and password",
     tags=["auth"],
 )
-async def login(body: LoginRequest) -> JSONResponse:
-    """Verify credentials and set the session cookie. Generic error on failure."""
+async def login(body: LoginRequest, request: Request) -> JSONResponse:
+    """Verify credentials and set the session cookie. Generic error on failure.
+
+    Rate-limited by client IP to blunt password brute-forcing.
+    """
+    await rate_limit.check_and_record(
+        f"login:{rate_limit.client_ip(request)}",
+        rate_limit.LOGIN_LIMIT,
+        rate_limit.LOGIN_WINDOW_SECONDS,
+    )
     user = await db.get_user_by_email(body.email)
     if user is None or not auth.verify_password(body.password, user["password_hash"]):
         return JSONResponse(
