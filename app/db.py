@@ -83,6 +83,13 @@ _TABLES = [
         redeemed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(invite_code_id, user_id)
     )""",
+    # Rate limiting (hardening pass): one row per throttled attempt. SQLite-backed so the
+    # limit is shared across all Gunicorn worker processes and survives restarts.
+    """CREATE TABLE IF NOT EXISTS rate_limit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bucket TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )""",
     # ----- Forward-declared for later sessions (created now, unused this session) -----
     """CREATE TABLE IF NOT EXISTS feedback (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -130,6 +137,12 @@ _TABLES = [
     )""",
 ]
 
+# Indexes created after the tables. Kept separate from _TABLES for clarity.
+_INDEXES = [
+    """CREATE INDEX IF NOT EXISTS idx_rate_limit_bucket_created
+       ON rate_limit_events(bucket, created_at)""",
+]
+
 # Columns that store JSON. Parsed on read, dumped on write.
 _JSON_LIST_COLUMNS = ("favorite_genres", "favorite_authors", "examples", "dislikes")
 _JSON_OBJ_COLUMNS = ("content_preferences",)
@@ -171,6 +184,8 @@ async def init_db() -> None:
     try:
         async with connect() as db:
             for ddl in _TABLES:
+                await db.execute(ddl)
+            for ddl in _INDEXES:
                 await db.execute(ddl)
             await db.commit()
     except Exception as exc:  # pragma: no cover - defensive
