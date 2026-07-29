@@ -16,7 +16,6 @@ Usage:
 """
 import argparse
 import asyncio
-import secrets
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,16 +27,9 @@ from dotenv import load_dotenv
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import auth, db  # noqa: E402
-from app.services.invites import normalize_and_validate_code  # noqa: E402
+from app.services.invites import generate_code, normalize_and_validate_code  # noqa: E402
 
 load_dotenv()
-
-_RANDOM_CODE_BYTES = 5  # -> 10 hex chars, comfortably within the 4–32 range.
-
-
-def _generate_code() -> str:
-    """Generate a random, human-typable invite code (uppercase hex)."""
-    return secrets.token_hex(_RANDOM_CODE_BYTES).upper()
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -83,7 +75,7 @@ async def _run(args: argparse.Namespace) -> int:
     email = args.email.strip().lower()
 
     if args.code is None:
-        code = _generate_code()
+        code = generate_code()
         generated = True
     else:
         try:
