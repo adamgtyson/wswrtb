@@ -16,8 +16,8 @@ Session 1 builds only the onboarding vertical slice.
 
 ```
 app/
-├── main.py            FastAPI entrypoint: routers, static mount, page routes, health, auth error handler
-├── db.py              SQLite schema init (CREATE TABLE IF NOT EXISTS) + async connection helpers
+├── main.py            FastAPI entrypoint: routers, CORS, static mount, page routes, health, error handlers
+├── db.py              SQLite schema init (CREATE TABLE IF NOT EXISTS) + indexes + async connection helpers
 ├── auth.py            bcrypt hashing (passlib), JWT issue/verify, get_current_user dependency
 ├── deps.py            require_membership(...) / require_owner(...) authorization factories
 ├── models.py          Pydantic request/response schemas + server-side validation
@@ -26,7 +26,8 @@ app/
 │   ├── profile_routes.py  /api/profile GET/PUT, + /api/groups/{id} (role-aware) demo route
 │   └── group_routes.py    owner tooling: member roster/removal, invite-code lifecycle, /group page
 └── services/
-    └── invites.py     Atomic invite-code redemption + account creation + code gen/normalization
+    ├── invites.py     Atomic invite-code redemption + account creation + code gen/normalization
+    └── rate_limit.py  SQLite-backed sliding-window limiter (correct across Gunicorn workers)
 
 static/                signup.html, login.html, profile.html, group.html + css/ + js/
 scripts/seed_group.py  CLI to create the first owner, group, and seat-limited invite code
@@ -88,10 +89,11 @@ tests/                 pytest suite (onboarding + group management: gating, seat
 ## Database schema
 
 Full schema lives in `app/db.py`, all `CREATE TABLE IF NOT EXISTS` so later sessions
-need no migration. Session 1 **actively uses** `users`, `groups`, `memberships`,
-`invite_codes`, `invite_redemptions`. The rest (`feedback`, `reading_list`,
-`voting_rounds`, `ballots`, `ai_usage`, `recent_searches`, `api_cache`, `flags`) are
-**forward-declared** — created now, unused this session.
+need no migration. **Actively used:** `users`, `groups`, `memberships`, `invite_codes`,
+`invite_redemptions` (onboarding + group management), and `rate_limit_events` (hardening
+pass — sliding-window limiter, indexed on `(bucket, created_at)`). The rest (`feedback`,
+`reading_list`, `voting_rounds`, `ballots`, `ai_usage`, `recent_searches`, `api_cache`,
+`flags`) are **forward-declared** — created now, unused.
 
 Invite model: `invite_codes` (seat-limited, multi-redemption) + `invite_redemptions`
 (one row per successful redemption, audit trail + UNIQUE guard). This supersedes any
@@ -101,7 +103,7 @@ single-use `invites` table. One invite code maps to one group.
 
 ## Current Build State
 
-_Sessions 1–2 complete. 32 tests passing, 89% coverage._
+_Sessions 1–2 + pre-Session-3 hardening pass complete. 41 tests passing, 89% coverage._
 
 **Session 1 — Scaffold + Code-Gated Onboarding:**
 
@@ -150,6 +152,26 @@ _Sessions 1–2 complete. 32 tests passing, 89% coverage._
   on it, owner deactivates it and further registration is refused (400); non-owners see
   no emails and 403 on owner endpoints.
 
+**Pre-Session-3 Hardening Pass — abuse-resistance (not AI cost control):**
+
+- **Rate limiting** (`app/services/rate_limit.py`, `rate_limit_events` table):
+  SQLite-backed sliding-window limiter — **deliberately not in-memory**, because
+  Gunicorn workers have separate memory (an in-process counter would let each worker
+  grant the full quota and reset on restart). `check_and_record(bucket, limit, window)`
+  runs count-then-insert inside `BEGIN IMMEDIATE` (racing requests on a bucket serialize),
+  evaluates the window in SQL, and opportunistically prunes the bucket's expired rows.
+  Wired onto `POST /api/register` (by IP, default 5/hr), `POST /api/login` (by IP,
+  10/15min), and `POST /api/groups/{id}/invite-codes` (by owner id, 20/hr). Limits are
+  env-configurable; a trip raises `RateLimitError` → global **HTTP 429** (generic).
+  `client_ip()` flags that `X-Forwarded-For` handling is deferred until the Nginx proxy
+  exists (Session 7) — trusting it now would let clients spoof their IP.
+- **CORS** (`app/main.py`): `CORSMiddleware` with an explicit `ALLOWED_ORIGINS` whitelist
+  from `.env` (no wildcards; `allow_credentials=True` for cookie auth; methods/headers
+  restricted to what the app uses). Production must set the real deployed origin(s).
+- **DoD verified live**: 6th registration from one IP returns 429 (default limit);
+  whitelisted origin gets an echoing `Access-Control-Allow-Origin`, unlisted origin gets
+  none; seed script now uses the shared `generate_code`.
+
 ---
 
 ## Pending / on the horizon
@@ -161,15 +183,16 @@ _Sessions 1–2 complete. 32 tests passing, 89% coverage._
 - Not yet: password reset, email verification, Stripe/billing, managed auth (Clerk),
   multi-owner support, group renaming/creation in-app, email notifications.
 
-**Housekeeping noticed (not blocking):**
+**Housekeeping / known follow-ups (not blocking):**
 - `pytest-cov` is used for the coverage report but is not pinned in `requirements.txt`
   (production deps only). Add a `requirements-dev.txt` if/when coverage joins CI.
-- `session1_summary.txt` is a stray scratch file in the repo root (untracked). Delete
-  when convenient.
-- Minor duplication: the random invite-code generator now lives in
-  `services/invites.py` (`generate_code`), but `scripts/seed_group.py` still has its own
-  copy (left untouched per Session 2 scope). Fold the script onto the shared helper next
-  time the seed script is edited.
+- **At deploy time (Session 7):** implement `X-Forwarded-For` handling in
+  `rate_limit.client_ip()` once Nginx fronts the app, and set real production
+  `ALLOWED_ORIGINS` — otherwise IP-based limits key off the proxy IP and CORS blocks the
+  real domain. Flagged in code.
+- Rate-limit cleanup is per-bucket and opportunistic; a bucket that goes permanently
+  silent leaves a few stale rows. Negligible at book-club scale — add a global sweep only
+  if the table ever grows unexpectedly.
 
 ---
 
