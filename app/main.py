@@ -1,11 +1,13 @@
 """FastAPI entrypoint: lifespan DB init, routers, static mount, page/health routes,
 and the global not-authenticated handler.
 """
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -32,6 +34,27 @@ app = FastAPI(
     title="WSWRTB",
     description="Group-aware book recommendations for book clubs and families. Session 1: onboarding.",
     lifespan=lifespan,
+)
+
+
+def _allowed_origins() -> list[str]:
+    """Parse ALLOWED_ORIGINS (comma-separated) from the environment into a list.
+
+    Empty/unset means no cross-origin requests are permitted — never a wildcard, since
+    the app authenticates with cookies (allow_credentials=True forbids "*" anyway).
+    """
+    raw = os.environ.get("ALLOWED_ORIGINS", "")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+# Explicit CORS whitelist. Methods/headers are restricted to what the app actually uses
+# rather than wildcarded. Production must set the real deployed origin(s) in .env.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins(),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+    allow_headers=["Content-Type"],
 )
 
 
