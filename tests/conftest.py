@@ -10,6 +10,13 @@ import pytest
 os.environ.setdefault("JWT_SECRET", "test_jwt_secret_minimum_32_characters!!")
 os.environ.setdefault("JWT_EXPIRY_DAYS", "7")
 os.environ.setdefault("ENVIRONMENT", "development")
+# Fixed origin so CORS tests have a known allowed value.
+os.environ.setdefault("ALLOWED_ORIGINS", "http://localhost:8000")
+# Generous rate limits so functional tests aren't throttled; the rate-limit tests
+# override these per-test via monkeypatch to exercise the trip.
+os.environ.setdefault("RATE_LIMIT_REGISTER", "100000")
+os.environ.setdefault("RATE_LIMIT_LOGIN", "100000")
+os.environ.setdefault("RATE_LIMIT_INVITE_CREATE", "100000")
 
 # Point the app at a throwaway DB file before importing anything that reads DB_PATH.
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
