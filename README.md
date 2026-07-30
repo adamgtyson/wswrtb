@@ -1,11 +1,11 @@
 # WSWRTB
 
 A conversational, group-aware **book-recommendation** web app for book clubs and
-families. Session 1 ships the onboarding vertical slice: code-gated registration,
-authentication, and a structured preference profile. Recommendations, voting, and AI
-cost controls come in later sessions.
+families. It currently ships code-gated onboarding, owner/admin group management, and
+metered Claude-powered recommendations. Google Books lookup, voting, and reading lists
+come in later sessions.
 
-## What it does (Session 1)
+## What it does
 
 - An admin seeds a **book club** (group) and a **seat-limited invite code**.
 - New members can register **only** by supplying that invite code — public signup is
@@ -13,6 +13,11 @@ cost controls come in later sessions.
 - Each member fills a structured **preference profile** (favorite genres/authors, books
   they've loved, dislikes, content limits, reading pace, preferred length) that persists
   across logout/login.
+- The **owner** manages the group in-app: view the roster (emails owner-only), remove
+  members, and create/deactivate further invite codes.
+- Any member can **ask for recommendations**: pick who's reading, describe what you're
+  after, and get five books chosen from the selected members' combined profiles. Every
+  Claude call is metered against a global daily spend ceiling and per-user rate limits.
 
 ## Stack — and why
 
@@ -53,6 +58,26 @@ python3 -c "import secrets; print('JWT_SECRET=' + secrets.token_hex(32))"
 | `JWT_EXPIRY_DAYS` | Session lifetime in days (default 7).                              |
 | `ENVIRONMENT`     | `development` or `production`. Gates the cookie `Secure` flag.     |
 | `WSWRTB_DB_PATH`  | Optional. Override the SQLite file path (defaults to `./wswrtb.db`). |
+| `ALLOWED_ORIGINS` | Comma-separated CORS whitelist — no wildcards. Production must set the real domain(s). |
+| `RATE_LIMIT_*`    | Optional. Abuse throttles for register/login/invite-create (attempts + window seconds). |
+
+### AI environment variables
+
+`ANTHROPIC_API_KEY` is required for the recommendation feature; without it those
+endpoints fail loudly with a 503 rather than degrading silently. Issue the key inside a
+dedicated Anthropic Console **workspace with its own hard monthly spend cap** — the
+in-app ceilings below are the first line of defence, not the only one.
+
+| Variable                        | Description                                                     |
+|---------------------------------|-----------------------------------------------------------------|
+| `ANTHROPIC_API_KEY`             | Anthropic API key. Never committed — `.env.example` stays blank. |
+| `CLAUDE_MODEL`                  | Model id (default `claude-haiku-4-5`). Changing it changes cost; update the pricing constants in `app/services/claude_service.py` to match. |
+| `AI_DAILY_COST_CEILING_USD`     | Global kill switch (default 5). Once ALL users' combined spend for the UTC day reaches this, AI is refused for everyone until the day rolls over. |
+| `AI_RATE_PER_HOUR`              | Per-user AI requests per rolling hour (default 15).             |
+| `AI_RATE_PER_DAY`               | Per-user AI requests per rolling day (default 50).              |
+| `FREE_TIER_MONTHLY_AI_REQUESTS` | Extra cap for `plan = 'free'` users over a rolling 30 days (default 15). Everyone is on `free` today, so in practice this binds first. |
+| `AI_MAX_OUTPUT_TOKENS`          | Optional. Max output tokens per Claude call (default 2000).     |
+| `AI_MAX_PROMPT_CHARS`           | Optional. Max length of a member's prompt (default 1000).       |
 
 ## Seed the first club and invite code
 
@@ -84,6 +109,8 @@ Then open:
 - `http://<host>:8000/signup` — register with your email, password, name, and the club code.
 - `http://<host>:8000/login` — log in.
 - `http://<host>:8000/profile` — edit your preference profile.
+- `http://<host>:8000/group` — roster, plus invite-code tools if you're the owner.
+- `http://<host>:8000/recommend` — ask for book recommendations.
 - `http://<host>:8000/health` — liveness check (`{"status": "ok"}`).
 - `http://<host>:8000/docs` — interactive API docs.
 
@@ -93,15 +120,21 @@ Then open:
 pytest
 ```
 
-Covers: registration rejects missing/invalid/expired/full codes; a valid code creates
-the membership and increments the seat count; the code deactivates at the cap; duplicate
-email is rejected; a user can't redeem the same code twice; profile data round-trips;
-and `require_membership` returns 403 for non-members, 200 for members.
+Covers onboarding (invite codes: missing/invalid/expired/full, seat accounting, duplicate
+email, double redemption, profile round-trip), authorization (`require_membership` /
+`require_owner`, cross-tenant access), group management (roster, member removal,
+invite-code lifecycle), abuse throttling and CORS, and the AI layer (all four cost/rate
+controls, usage logging, response parsing, dedup and retry).
 
-## Known limitations (Session 1)
+**No test ever calls the real Anthropic API** — the client is mocked everywhere, so a
+test run can never spend from the workspace budget.
+
+## Known limitations
 
 - No public signup by design — every member needs an invite code.
 - No password reset, email verification, or billing yet.
-- No owner/admin UI beyond the CLI seed script (Session 2).
-- No recommendations, book API, AI, or voting yet.
+- Recommendations are not yet verified against a book database, so a title Claude
+  returns could be wrong or invented. Google Books lookup is the next session.
+- The `/recommend` page is a deliberate placeholder — real book cards come later.
+- One owner per group; no in-app group creation or renaming.
 - Password hashing runs synchronously; fine at book-club scale (see `CLAUDE.md`).

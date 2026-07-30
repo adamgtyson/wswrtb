@@ -22,16 +22,18 @@ app/
 ├── deps.py            require_membership(...) / require_owner(...) authorization factories
 ├── models.py          Pydantic request/response schemas + server-side validation
 ├── routes/
-│   ├── auth_routes.py     /api/register (code-gated), /api/login, /api/logout, + page routes
-│   ├── profile_routes.py  /api/profile GET/PUT, + /api/groups/{id} (role-aware) demo route
-│   └── group_routes.py    owner tooling: member roster/removal, invite-code lifecycle, /group page
+│   ├── auth_routes.py       /api/register (code-gated), /api/login, /api/logout, + page routes
+│   ├── profile_routes.py    /api/profile GET/PUT, + /api/groups/{id} (role-aware) demo route
+│   ├── group_routes.py      owner tooling: member roster/removal, invite-code lifecycle, /group page
+│   └── recommend_routes.py  /api/groups/{id}/recommend + prompt building/parsing, /recommend page
 └── services/
-    ├── invites.py     Atomic invite-code redemption + account creation + code gen/normalization
-    └── rate_limit.py  SQLite-backed sliding-window limiter (correct across Gunicorn workers)
+    ├── invites.py        Atomic invite-code redemption + account creation + code gen/normalization
+    ├── rate_limit.py     SQLite-backed sliding-window limiter (correct across Gunicorn workers)
+    └── claude_service.py THE only Anthropic caller: cost/rate gates + ai_usage accounting
 
-static/                signup.html, login.html, profile.html, group.html + css/ + js/
+static/                signup.html, login.html, profile.html, group.html, recommend.html + css/ + js/
 scripts/seed_group.py  CLI to create the first owner, group, and seat-limited invite code
-tests/                 pytest suite (onboarding + group management: gating, seats, profile, authz)
+tests/                 pytest suite (onboarding, group management, hardening, AI metering + recs)
 ```
 
 ### Data flow (onboarding)
@@ -90,10 +92,13 @@ tests/                 pytest suite (onboarding + group management: gating, seat
 
 Full schema lives in `app/db.py`, all `CREATE TABLE IF NOT EXISTS` so later sessions
 need no migration. **Actively used:** `users`, `groups`, `memberships`, `invite_codes`,
-`invite_redemptions` (onboarding + group management), and `rate_limit_events` (hardening
-pass — sliding-window limiter, indexed on `(bucket, created_at)`). The rest (`feedback`,
-`reading_list`, `voting_rounds`, `ballots`, `ai_usage`, `recent_searches`, `api_cache`,
-`flags`) are **forward-declared** — created now, unused.
+`invite_redemptions` (onboarding + group management), `rate_limit_events` (hardening
+pass — sliding-window limiter, indexed on `(bucket, created_at)`), and `ai_usage`
+(Session 3 — one row per successful Claude call; indexed on `(user_id, created_at)` and
+`(created_at)` for the per-user count and global daily-sum queries). `users.plan` is now
+read too (free-tier monthly allowance). The rest (`feedback`, `reading_list`,
+`voting_rounds`, `ballots`, `recent_searches`, `api_cache`, `flags`) are
+**forward-declared** — created now, unused. No table or column has ever been altered.
 
 Invite model: `invite_codes` (seat-limited, multi-redemption) + `invite_redemptions`
 (one row per successful redemption, audit trail + UNIQUE guard). This supersedes any
@@ -103,7 +108,7 @@ single-use `invites` table. One invite code maps to one group.
 
 ## Current Build State
 
-_Sessions 1–2 + pre-Session-3 hardening pass complete. 41 tests passing, 89% coverage._
+_Sessions 1–3 + the pre-Session-3 hardening pass complete. 92 tests passing, 92% coverage._
 
 **Session 1 — Scaffold + Code-Gated Onboarding:**
 
@@ -172,14 +177,59 @@ _Sessions 1–2 + pre-Session-3 hardening pass complete. 41 tests passing, 89% c
   whitelisted origin gets an echoing `Access-Control-Allow-Origin`, unlisted origin gets
   none; seed script now uses the shared `generate_code`.
 
+**Session 3 — Metered Claude service + recommendation engine:**
+
+- **Metered AI** (`app/services/claude_service.py`): the ONLY module that imports the
+  `anthropic` SDK — nothing else may call it directly. `complete_text(...)` runs four
+  checks (in order, each its own exception → generic **HTTP 429**) before any request:
+  the **global daily cost ceiling** (`AI_DAILY_COST_CEILING_USD`, default $5) summed
+  across ALL users for the UTC day — a kill switch, not a per-user limit; then the
+  caller's **hourly** (15) and **daily** (50) request counts; then, for `plan = 'free'`
+  users, a rolling-30-day count (`FREE_TIER_MONTHLY_AI_REQUESTS`, 15 — the binding
+  constraint in practice, since everyone is 'free'). Every check is a fresh `ai_usage`
+  query — **no in-memory state anywhere**, same Gunicorn-workers reasoning as
+  `rate_limit_events`, but deliberately a **separate table**: that one is the generic
+  abuse throttle, this one carries tokens and cost. After a successful call it writes one
+  `ai_usage` row with the **real** `input_tokens`/`output_tokens` from the response and
+  `est_cost_usd` from named per-MTok pricing constants (`claude-haiku-4-5`: $1 in / $5
+  out — **must be revisited if Anthropic's pricing changes**, flagged in code).
+  `max_tokens` and the max prompt length are named constants. A missing
+  `ANTHROPIC_API_KEY` raises → **503**; an upstream/parse failure → **502**. Never
+  degrades silently.
+- **Recommendations** (`app/routes/recommend_routes.py`): `POST /api/groups/{id}/recommend`
+  behind `require_membership`. Body is `{prompt, member_user_ids}`; every selected id is
+  resolved through the group's membership rows, so a cross-tenant id is a **400** before
+  any spend. The system prompt is built from the selected members' stored profile columns
+  (emails never enter a prompt), states genre as a **hard constraint**, and forbids
+  recommending anything the member named themselves. Three rules are then enforced
+  **server-side** rather than trusted to the model: markdown fences stripped before
+  `json.loads` + per-entry Pydantic validation (malformed → 502, not a crash); dedup on
+  normalized `(title, author)`; and a filter dropping any title/author named in the raw
+  prompt. Short of five, it makes **exactly one** retry with the seen titles as an
+  exclusion list — a failed top-up returns the partial set rather than discarding an
+  already-billed call. No `google_books_id` this session (Session 4 adds verification).
+- **Frontend**: `static/recommend.html` + `recommend.js` — deliberate placeholder (member
+  checkboxes, prompt box, plain-text results), linked from `/group` and `/profile`.
+  Session 5 replaces it with real book cards.
+- **Tests**: 51 new, **every Anthropic call mocked** — the fake client asserts on any
+  unexpected extra call, so a test run can never hit the API or spend from the workspace
+  cap. Covers all four limits (incl. one user's spend blocking a different user), usage
+  logging with real token counts, cross-tenant rejection, fence-stripping/parsing, and
+  dedup + single-retry.
+
 ---
 
 ## Pending / on the horizon
 
-- **Next (Session 3):** metered Claude service (cost controls, `ai_usage` accounting) —
-  the prerequisite for the conversational profile-discovery layer.
-- Later: recommendation engine, Google Books integration, voting rounds/ballots,
-  reading lists, cross-group matching, flags review.
+- **Next (Session 4):** Google Books integration — look up and verify each recommended
+  title, add `google_books_id` to the model output, and populate `api_cache`. Until then
+  a recommended book is unverified and could be wrong or invented.
+- **Deferred, needs its own session:** the conversational (Claude) profile-discovery
+  layer. It was split out of Session 3 deliberately — it's a registration/profile UX
+  feature that depends on the metering built here but does not need to ship with it. It
+  must augment the SAME JSON preference columns, never fork the data model.
+- Later: voting rounds/ballots (5 candidates, matching `RECOMMENDATION_COUNT`), reading
+  lists, feedback thumbs, cross-group matching, flags review.
 - Not yet: password reset, email verification, Stripe/billing, managed auth (Clerk),
   multi-owner support, group renaming/creation in-app, email notifications.
 
@@ -193,6 +243,20 @@ _Sessions 1–2 + pre-Session-3 hardening pass complete. 41 tests passing, 89% c
 - Rate-limit cleanup is per-bucket and opportunistic; a bucket that goes permanently
   silent leaves a few stale rows. Negligible at book-club scale — add a global sweep only
   if the table ever grows unexpectedly.
+- **AI pricing constants are hardcoded** in `claude_service.py`. If Anthropic changes
+  `claude-haiku-4-5` pricing (or `CLAUDE_MODEL` is pointed at a different model) and the
+  constants aren't updated, `est_cost_usd` silently stops reflecting real spend and the
+  daily ceiling drifts. The Console workspace hard cap is the backstop.
+- `ai_usage` rows are never pruned. That's intentional — it's the cost audit trail — but
+  it grows forever; revisit only if the table ever gets large.
+- The recommendation prompt interpolates user-supplied display names and preference text,
+  an inherent prompt-injection surface. Bounded today by invite-gated membership plus
+  schema validation and server-side filtering of the output. Worth revisiting if signup
+  ever opens up.
+- Anthropic **structured outputs** (`output_config.format`) are supported on
+  `claude-haiku-4-5` and would make JSON parsing near-bulletproof. Not adopted this
+  session (defensive fence-stripping + Pydantic was the specified approach); a cheap
+  hardening win later.
 
 ---
 

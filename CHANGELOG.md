@@ -2,6 +2,11 @@
 
 One line per session. Newest first.
 
+- **Session 3** — Metered recommendation engine: a single Claude service enforcing a global
+  daily cost ceiling plus per-user hourly/daily/free-tier limits derived from `ai_usage`
+  (never in-memory), real token/cost logging, and `POST /api/groups/{id}/recommend` with
+  server-side member validation, dedup, one bounded retry, and a placeholder ask page.
+  92 tests, 92% coverage.
 - **Hardening pass (pre-Session 3)** — abuse resistance: SQLite-backed sliding-window
   rate limiting (worker-safe, no in-memory state) on register/login/invite-create, and a
   CORS origin whitelist via `ALLOWED_ORIGINS`; plus seed-script code-generator dedup and
