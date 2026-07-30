@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ask for a book · WSWRTB</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="/static/js/theme.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <header class="topbar">
+      <span class="brand">WSWRTB</span>
+      <div>
+        <a class="navlink" href="/profile">Profile</a>
+        <a class="navlink" href="/group">Group</a>
+        <button id="theme-toggle" class="ghost" type="button">Theme</button>
+        <button id="logout" class="ghost" type="button">Log out</button>
+      </div>
+    </header>
+
+    <h1 id="group-name">Ask for a book</h1>
+    <p class="subtitle">
+      Pick who's reading, describe what you're after, and get five suggestions.
+      <span class="hint">(Rough placeholder — proper book cards come later.)</span>
+    </p>
+
+    <!-- Shown only when the user belongs to more than one group. -->
+    <div id="group-picker-wrap" class="hidden">
+      <label for="group-picker">Group</label>
+      <select id="group-picker"></select>
+    </div>
+
+    <div id="page-msg" class="msg"></div>
+
+    <section class="card">
+      <h2 class="section-title" style="margin-top:0;">Who's reading?</h2>
+      <div id="member-checks"></div>
+
+      <form id="ask-form" novalidate>
+        <label for="prompt">What are you in the mood for?</label>
+        <textarea
+          id="prompt"
+          maxlength="1000"
+          placeholder="e.g. A twisty mystery set somewhere cold, nothing too long"
+        ></textarea>
+        <button class="primary" id="ask-btn" type="submit">Get recommendations</button>
+      </form>
+    </section>
+
+    <section class="card hidden" id="results-card">
+      <h2 class="section-title" style="margin-top:0;">Recommendations</h2>
+      <ul class="list" id="results"></ul>
+    </section>
+  </div>
+
+  <script src="/static/js/recommend.js"></script>
+</body>
+</html>
