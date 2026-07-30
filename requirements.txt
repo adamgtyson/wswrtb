@@ -7,4 +7,5 @@ passlib==1.7.4
 bcrypt==4.0.1
 PyJWT==2.9.0
 httpx==0.28.1
+anthropic==0.120.2
 pytest==8.3.4

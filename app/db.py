@@ -28,6 +28,10 @@ _TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 ROLE_OWNER = "owner"
 ROLE_MEMBER = "member"
 
+# Account plans. 'free' is the only plan that exists today (users.plan defaults to it);
+# it gates the monthly AI request allowance. No billing exists yet.
+PLAN_FREE = "free"
+
 # ---------------------------------------------------------------------------
 # Schema — active tables (Session 1) followed by forward-declared tables.
 # ---------------------------------------------------------------------------
@@ -141,6 +145,13 @@ _TABLES = [
 _INDEXES = [
     """CREATE INDEX IF NOT EXISTS idx_rate_limit_bucket_created
        ON rate_limit_events(bucket, created_at)""",
+    # Session 3: every metered Claude call counts this user's recent rows (hour/day/month
+    # windows) before issuing a request, and sums today's cost across ALL users. Both are
+    # hot per-request reads, so index the two access patterns.
+    """CREATE INDEX IF NOT EXISTS idx_ai_usage_user_created
+       ON ai_usage(user_id, created_at)""",
+    """CREATE INDEX IF NOT EXISTS idx_ai_usage_created
+       ON ai_usage(created_at)""",
 ]
 
 # Columns that store JSON. Parsed on read, dumped on write.
@@ -356,6 +367,47 @@ async def list_members(group_id: int) -> list[dict]:
     ]
 
 
+async def get_group_member_profiles(group_id: int, user_ids: list[int]) -> list[dict]:
+    """Return preference profiles for the given users, restricted to members of the group.
+
+    Session 3: this is both the data source for recommendation prompts AND the
+    cross-tenant guard — a user id that isn't a member of `group_id` simply produces no
+    row, so the caller can compare the returned ids against what was requested and reject
+    the request. Email is deliberately not selected; it never belongs in an AI prompt.
+
+    The `IN (...)` placeholder list is generated from the id count — the ids themselves
+    are still bound as `?` parameters, never interpolated.
+    """
+    if not user_ids:
+        return []
+    placeholders = ",".join("?" for _ in user_ids)
+    async with connect() as db:
+        async with db.execute(
+            f"""SELECT u.id, u.display_name, u.favorite_genres, u.favorite_authors,
+                       u.examples, u.dislikes, u.content_preferences, u.reading_pace,
+                       u.preferred_length
+                FROM memberships m JOIN users u ON u.id = m.user_id
+                WHERE m.group_id = ? AND u.id IN ({placeholders})
+                ORDER BY u.id""",
+            (group_id, *user_ids),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [
+        {
+            "user_id": r[0],
+            "display_name": r[1],
+            "favorite_genres": json.loads(r[2]),
+            "favorite_authors": json.loads(r[3]),
+            "examples": json.loads(r[4]),
+            "dislikes": json.loads(r[5]),
+            "content_preferences": json.loads(r[6]),
+            "reading_pace": r[7],
+            "preferred_length": r[8],
+        }
+        for r in rows
+    ]
+
+
 async def remove_membership(user_id: int, group_id: int) -> bool:
     """Delete a user's membership in a group. Returns True if a row was removed.
 
@@ -429,6 +481,84 @@ async def deactivate_invite_code(group_id: int, code_id: int) -> bool:
         )
         await db.commit()
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# AI usage accounting (Session 3)
+#
+# `ai_usage` is the single source of truth for every AI cost control: the global daily
+# spend ceiling and all three per-user request limits are derived by querying THIS table
+# on every call. Nothing is cached in process memory — under Gunicorn each worker has its
+# own memory, so an in-process counter would let every worker grant the full quota
+# independently (the same reasoning that put `rate_limit_events` in SQLite).
+# ---------------------------------------------------------------------------
+async def record_ai_usage(
+    *,
+    user_id: int,
+    group_id: int | None,
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    est_cost_usd: float,
+    endpoint: str | None,
+) -> int:
+    """Insert one row recording a completed Claude call. Returns the new row id.
+
+    Token counts must come from the API response's usage field (never estimated), and
+    `est_cost_usd` from the pricing constants in services/claude_service.py.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            """INSERT INTO ai_usage
+                 (user_id, group_id, model, input_tokens, output_tokens, est_cost_usd, endpoint)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (user_id, group_id, model, input_tokens, output_tokens, est_cost_usd, endpoint),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def ai_cost_today_usd() -> float:
+    """Return the summed est_cost_usd of ALL users' calls so far in the current UTC day.
+
+    The boundary is the UTC calendar day (`date('now')` in SQLite, which is UTC), not a
+    rolling window: this backs the global kill switch, which is meant to reset each day.
+    Comparing the stored 'YYYY-MM-DD HH:MM:SS' timestamp against 'YYYY-MM-DD' works
+    because the format is lexicographically ordered.
+    """
+    async with connect() as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(est_cost_usd), 0) FROM ai_usage WHERE created_at >= date('now')"
+        ) as cur:
+            (total,) = await cur.fetchone()
+    return float(total)
+
+
+async def count_ai_usage_for_user(user_id: int, window_seconds: int) -> int:
+    """Count a user's AI calls within the trailing `window_seconds`.
+
+    Sliding window (like the abuse limiter), not a calendar bucket — so a user cannot
+    burst a full day's quota either side of midnight. The window is evaluated in SQL so
+    counting and the stored CURRENT_TIMESTAMP share one UTC clock (no Python/DB skew).
+    """
+    # Bound param, not string interpolation — the value is an int-coerced modifier string.
+    window_modifier = f"-{int(window_seconds)} seconds"
+    async with connect() as db:
+        async with db.execute(
+            """SELECT COUNT(*) FROM ai_usage
+               WHERE user_id = ? AND created_at >= datetime('now', ?)""",
+            (user_id, window_modifier),
+        ) as cur:
+            (count,) = await cur.fetchone()
+    return int(count)
+
+
+async def get_user_plan(user_id: int) -> str | None:
+    """Return the user's plan ('free' for everyone today), or None if no such user."""
+    async with connect() as db:
+        async with db.execute("SELECT plan FROM users WHERE id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+    return row[0] if row else None
 
 
 # ---------------------------------------------------------------------------
