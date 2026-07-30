@@ -3,9 +3,11 @@ the client. These schemas define the preference data model that a future convers
 (Claude) discovery layer must augment, not fork.
 """
 import re
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
+
+from app.services.claude_service import MAX_PROMPT_CHARS
 
 # Basic email shape check — avoids pulling in the email-validator dependency while still
 # rejecting obviously malformed addresses server-side.
@@ -19,6 +21,15 @@ _CONTENT_LEVELS = ("none", "mild", "moderate", "graphic")
 # Invite-code seat bounds for owner-created codes.
 _MIN_SEATS = 1
 _MAX_SEATS = 200
+
+# Recommendation request bounds (Session 3). The prompt length cap is shared with the
+# Claude service so the validation limit and the request-shape limit can't drift apart.
+_MIN_SELECTED_MEMBERS = 1
+_MAX_SELECTED_MEMBERS = 50  # matches the largest group a seat-limited invite can build
+_MAX_BOOK_FIELD_LEN = 300
+_MAX_REASON_LEN = 1000
+_MIN_BOOK_YEAR = 1
+_MAX_BOOK_YEAR = 2100
 
 
 def _clean_string_list(value: list) -> list[str]:
@@ -143,3 +154,82 @@ class InviteCodeCreate(BaseModel):
             return None
         v = v.strip()
         return v or None
+
+
+# ---------------------------------------------------------------------------
+# Recommendations (Session 3)
+# ---------------------------------------------------------------------------
+class RecommendRequest(BaseModel):
+    """A member's recommendation request: free-text prompt + who's reading.
+
+    `member_user_ids` is validated against the group's actual membership in the route —
+    a caller cannot pull another group's profiles into their prompt by guessing ids.
+    """
+
+    prompt: str = Field(..., min_length=1, max_length=MAX_PROMPT_CHARS)
+    member_user_ids: list[int] = Field(
+        ..., min_length=_MIN_SELECTED_MEMBERS, max_length=_MAX_SELECTED_MEMBERS
+    )
+
+    @field_validator("prompt")
+    @classmethod
+    def _clean_prompt(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("prompt must not be blank")
+        return v
+
+    @field_validator("member_user_ids")
+    @classmethod
+    def _dedupe_ids(cls, v: list[int]) -> list[int]:
+        """Drop duplicate ids while preserving order; reject empties after dedup."""
+        seen: set[int] = set()
+        cleaned: list[int] = []
+        for user_id in v:
+            if user_id not in seen:
+                seen.add(user_id)
+                cleaned.append(user_id)
+        if not cleaned:
+            raise ValueError("select at least one member")
+        return cleaned
+
+
+class Recommendation(BaseModel):
+    """One book Claude returned. Validates the model's output — never trusted as-is.
+
+    Session 4 adds a `google_books_id` here once there is a way to verify it against the
+    Google Books API; asking for an unverifiable id now would be worse than not asking.
+    """
+
+    title: str = Field(..., min_length=1, max_length=_MAX_BOOK_FIELD_LEN)
+    author: str = Field(..., min_length=1, max_length=_MAX_BOOK_FIELD_LEN)
+    year: Optional[int] = Field(default=None, ge=_MIN_BOOK_YEAR, le=_MAX_BOOK_YEAR)
+    reason: str = Field(..., min_length=1, max_length=_MAX_REASON_LEN)
+
+    @field_validator("title", "author", "reason")
+    @classmethod
+    def _strip_text(cls, v: str) -> str:
+        return v.strip()
+
+    @field_validator("year", mode="before")
+    @classmethod
+    def _coerce_year(cls, v: Any) -> Optional[int]:
+        """Accept a year given as a number, a numeric string, or null/unknown.
+
+        LLMs return years inconsistently ("1965", 1965, "unknown", ""). Anything that
+        isn't a plain integer year becomes None rather than failing the whole response.
+        """
+        if v is None or isinstance(v, int):
+            return v
+        if isinstance(v, str):
+            v = v.strip()
+            return int(v) if v.isdigit() else None
+        return None
+
+
+class RecommendationResponse(BaseModel):
+    """Response payload for a recommendation request."""
+
+    group_id: int
+    count: int
+    recommendations: list[Recommendation]

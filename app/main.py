@@ -1,6 +1,7 @@
 """FastAPI entrypoint: lifespan DB init, routers, static mount, page/health routes,
 and the global not-authenticated handler.
 """
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,9 +17,13 @@ from app.auth import COOKIE_NAME, NeedsLoginException
 from app.routes.auth_routes import router as auth_router
 from app.routes.group_routes import router as group_router
 from app.routes.profile_routes import router as profile_router
+from app.routes.recommend_routes import router as recommend_router
+from app.services.claude_service import AILimitError, ClaudeConfigError, ClaudeServiceError
 from app.services.rate_limit import RateLimitError
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 
@@ -32,7 +37,10 @@ async def lifespan(app_: FastAPI):
 
 app = FastAPI(
     title="WSWRTB",
-    description="Group-aware book recommendations for book clubs and families. Session 1: onboarding.",
+    description=(
+        "Group-aware book recommendations for book clubs and families. "
+        "Onboarding, group management, and metered Claude recommendations."
+    ),
     lifespan=lifespan,
 )
 
@@ -77,9 +85,49 @@ async def handle_rate_limit(request: Request, exc: RateLimitError):
     )
 
 
+@app.exception_handler(AILimitError)
+async def handle_ai_limit(request: Request, exc: AILimitError):
+    """Map any AI cost/rate refusal to a generic HTTP 429.
+
+    Covers the global daily cost ceiling and all three per-user request limits. The
+    message is deliberately identical for every case so it never reveals which control
+    tripped or how much quota remains; the specific subclass is logged in the service.
+    """
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": "Recommendations are temporarily unavailable. Please try again later."
+        },
+    )
+
+
+@app.exception_handler(ClaudeConfigError)
+async def handle_claude_unconfigured(request: Request, exc: ClaudeConfigError):
+    """Map a missing ANTHROPIC_API_KEY to a 503 — fail loudly, never silently degrade."""
+    logger.error("Claude is not configured: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "The recommendation service is not configured."},
+    )
+
+
+@app.exception_handler(ClaudeServiceError)
+async def handle_claude_failure(request: Request, exc: ClaudeServiceError):
+    """Map an upstream failure or unusable model response to a clean 502.
+
+    The internal detail is already logged where it happened; the client gets no stack
+    trace and no upstream error text.
+    """
+    return JSONResponse(
+        status_code=502,
+        content={"detail": "Couldn't get recommendations right now. Please try again."},
+    )
+
+
 app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(group_router)
+app.include_router(recommend_router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
