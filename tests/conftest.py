@@ -1,5 +1,10 @@
-"""Test fixtures: isolated temp DB, a fresh app client per test, a seed helper, and a
-raw-query helper. Env vars are set before any app import so db.py picks up the temp DB.
+"""Test fixtures: isolated temp DB, a fresh app client per test, a seed helper, a
+raw-query helper, and a mocked Claude client. Env vars are set before any app import so
+db.py picks up the temp DB.
+
+NOTHING in this suite may call the real Anthropic API. Every AI test installs the
+`fake_claude` fixture, which replaces the SDK client entirely — a test run must never
+issue a real request or spend a cent.
 """
 import asyncio
 import os
@@ -27,6 +32,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, db  # noqa: E402
 from app.main import app  # noqa: E402
+from app.services import claude_service  # noqa: E402
 
 OWNER_PASSWORD = "ownerpass1"
 
@@ -80,6 +86,80 @@ def fetchone():
         return _run(go())
 
     return _fetchone
+
+
+# ---------------------------------------------------------------------------
+# Mocked Claude client
+# ---------------------------------------------------------------------------
+class FakeBlock:
+    """Stand-in for an Anthropic text content block."""
+
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class FakeUsage:
+    """Stand-in for the response usage field the service reads token counts from."""
+
+    def __init__(self, input_tokens, output_tokens):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+
+class FakeResponse:
+    """Stand-in for a Messages API response."""
+
+    def __init__(self, text, input_tokens, output_tokens):
+        self.content = [FakeBlock(text)]
+        self.usage = FakeUsage(input_tokens, output_tokens)
+
+
+def claude_response(text, input_tokens=1000, output_tokens=300):
+    """Build a fake Claude response carrying `text` and explicit token counts."""
+    return FakeResponse(text, input_tokens, output_tokens)
+
+
+class FakeClaudeClient:
+    """Records calls and returns queued responses; never touches the network.
+
+    Exposes `.messages.create(**kwargs)` like the real async SDK client. Each call pops
+    the next queued response; an exception instance is raised instead of returned. Running
+    out of responses is an assertion failure, so an unexpected extra API call (e.g. a
+    retry loop that doesn't terminate) fails the test loudly rather than hanging.
+    """
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = []
+
+    @property
+    def messages(self):
+        return self
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        assert self._responses, f"Unexpected extra Claude call #{len(self.calls)}"
+        nxt = self._responses.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    @property
+    def call_count(self):
+        return len(self.calls)
+
+
+@pytest.fixture()
+def fake_claude(monkeypatch):
+    """Install a fake Claude client. Usage: `fake = fake_claude(resp1, resp2, ...)`."""
+
+    def _install(*responses):
+        fake = FakeClaudeClient(responses)
+        monkeypatch.setattr(claude_service, "get_client", lambda: fake)
+        return fake
+
+    return _install
 
 
 def register(client, code, email="member@example.com", password="password1",

@@ -319,14 +319,23 @@ async def recommend_books(
             len(accepted),
             RECOMMENDATION_COUNT,
         )
-        raw = await claude_service.complete_text(
-            user_id=user_id,
-            group_id=group_id,
-            endpoint=ENDPOINT_LABEL,
-            system_prompt=_build_system_prompt(profiles, exclusions=seen_titles),
-            user_prompt=body.prompt,
-        )
-        _accept(parse_recommendations(raw), accepted, seen_keys, seen_titles, normalized_prompt)
+        try:
+            raw = await claude_service.complete_text(
+                user_id=user_id,
+                group_id=group_id,
+                endpoint=ENDPOINT_LABEL,
+                system_prompt=_build_system_prompt(profiles, exclusions=seen_titles),
+                user_prompt=body.prompt,
+            )
+            _accept(
+                parse_recommendations(raw), accepted, seen_keys, seen_titles, normalized_prompt
+            )
+        except (claude_service.AILimitError, claude_service.ClaudeServiceError) as exc:
+            # The top-up is best-effort. If the retry trips a limit or comes back
+            # unusable, return the books we already have rather than throwing away a
+            # call the user has already been charged for.
+            logger.info("Recommendation top-up call failed (%s) — returning partial set", exc)
+            break
 
     final = accepted[:RECOMMENDATION_COUNT]
     return RecommendationResponse(
