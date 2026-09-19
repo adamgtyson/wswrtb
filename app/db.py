@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -559,6 +559,63 @@ async def get_user_plan(user_id: int) -> str | None:
         async with db.execute("SELECT plan FROM users WHERE id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
     return row[0] if row else None
+
+
+# ---------------------------------------------------------------------------
+# External API response cache (Session 4)
+#
+# `api_cache` fronts third-party lookups (today: Google Books) so a repeated
+# (title, author) never costs a second HTTP round trip. Like every other counter and
+# cache in this app it lives in SQLite rather than process memory — under Gunicorn each
+# worker has its own memory, so an in-process dict would be cached per-worker and lost
+# on restart. The key is namespaced by provider; see services/google_books.py.
+# ---------------------------------------------------------------------------
+async def get_api_cache(cache_key: str) -> dict | None:
+    """Return the cached payload for a key if present and unexpired, else None.
+
+    An expired row is treated exactly like a miss (the caller re-fetches and overwrites
+    it), so nothing here has to delete rows on a read path.
+    """
+    async with connect() as db:
+        async with db.execute(
+            "SELECT response_json FROM api_cache WHERE cache_key = ? AND expires_at > ?",
+            (cache_key, utcnow_str()),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row[0])
+    except (json.JSONDecodeError, TypeError):
+        # A corrupt row must not break a lookup — treat it as a miss and let the
+        # caller overwrite it on the next successful fetch.
+        logger.warning("Discarding unparseable api_cache row for %s", cache_key)
+        return None
+
+
+async def set_api_cache(cache_key: str, payload: dict, ttl_days: int) -> None:
+    """Insert or replace one cached API payload, computing `expires_at` from `ttl_days`.
+
+    Upsert rather than insert: a re-fetch after expiry refreshes the same key in place,
+    so the table holds at most one row per distinct lookup.
+    """
+    now = datetime.now(timezone.utc)
+    async with connect() as db:
+        await db.execute(
+            """INSERT INTO api_cache (cache_key, response_json, cached_at, expires_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(cache_key) DO UPDATE SET
+                 response_json = excluded.response_json,
+                 cached_at = excluded.cached_at,
+                 expires_at = excluded.expires_at""",
+            (
+                cache_key,
+                json.dumps(payload),
+                format_ts(now),
+                format_ts(now + timedelta(days=ttl_days)),
+            ),
+        )
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
