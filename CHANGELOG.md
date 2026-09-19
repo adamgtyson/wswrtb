@@ -2,6 +2,11 @@
 
 One line per session. Newest first.
 
+- **Session 4** — Google Books verification: a single-chokepoint lookup service with
+  0.8 word-overlap matching on title AND author, the forward-declared `api_cache` table
+  wired up (60-day TTL, no schema change), unverifiable books dropped and replaced
+  through Session 3's existing single retry, and a Google Books outage degrading to
+  `verified: false` instead of failing the request. 127 tests, 93% coverage.
 - **Session 3** — Metered recommendation engine: a single Claude service enforcing a global
   daily cost ceiling plus per-user hourly/daily/free-tier limits derived from `ai_usage`
   (never in-memory), real token/cost logging, and `POST /api/groups/{id}/recommend` with

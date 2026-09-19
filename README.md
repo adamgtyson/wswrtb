@@ -2,8 +2,8 @@
 
 A conversational, group-aware **book-recommendation** web app for book clubs and
 families. It currently ships code-gated onboarding, owner/admin group management, and
-metered Claude-powered recommendations. Google Books lookup, voting, and reading lists
-come in later sessions.
+metered Claude-powered recommendations verified against Google Books. Voting, reading
+lists, and the conversational profile-discovery layer come in later sessions.
 
 ## What it does
 
@@ -18,6 +18,10 @@ come in later sessions.
 - Any member can **ask for recommendations**: pick who's reading, describe what you're
   after, and get five books chosen from the selected members' combined profiles. Every
   Claude call is metered against a global daily spend ceiling and per-user rate limits.
+- Every recommendation is **verified against Google Books** before it is shown, and
+  comes back with the real volume's id, cover, description and page count. A book that
+  can't be confidently matched is dropped and replaced, so invented titles never reach
+  the page.
 
 ## Stack — and why
 
@@ -79,6 +83,24 @@ in-app ceilings below are the first line of defence, not the only one.
 | `AI_MAX_OUTPUT_TOKENS`          | Optional. Max output tokens per Claude call (default 2000).     |
 | `AI_MAX_PROMPT_CHARS`           | Optional. Max length of a member's prompt (default 1000).       |
 
+### Google Books environment variables
+
+Every recommendation is verified against the Google Books API before it reaches a
+member, so a title Claude invented is dropped instead of displayed.
+
+The API key is **optional in code** — the app starts and runs fine without one — but in
+practice you want one. Keyless requests share a single anonymous Google project whose
+daily quota is routinely exhausted by other callers; a keyless call from this dev box
+returns `429 Quota exceeded`. When Google Books is unreachable (a 429 included) the app
+degrades rather than failing: those books come back `verified: false`, which means
+verification is quietly off. Create a key in a Google Cloud project with the Books API
+enabled and set `GOOGLE_BOOKS_API_KEY`.
+
+| Variable                | Description                                                            |
+|-------------------------|------------------------------------------------------------------------|
+| `GOOGLE_BOOKS_API_KEY`  | Optional. Raises the Google Books rate limit. Omitted = keyless requests. |
+| `API_CACHE_TTL_DAYS`    | Optional. How long a verified volume stays in `api_cache` (default 60). Deliberately long: book metadata doesn't change, so this is insurance against a stale row, not a freshness requirement. |
+
 ## Seed the first club and invite code
 
 The seed script creates an owner user, a group, an owner membership, and one
@@ -133,8 +155,10 @@ test run can never spend from the workspace budget.
 
 - No public signup by design — every member needs an invite code.
 - No password reset, email verification, or billing yet.
-- Recommendations are not yet verified against a book database, so a title Claude
-  returns could be wrong or invented. Google Books lookup is the next session.
+- Fewer than five recommendations can come back: unverifiable books are dropped, and
+  only one top-up call is ever made.
+- If Google Books is unreachable, books are returned flagged `verified: false` rather
+  than dropped — the request degrades instead of failing, but those titles are unchecked.
 - The `/recommend` page is a deliberate placeholder — real book cards come later.
 - One owner per group; no in-app group creation or renaming.
 - Password hashing runs synchronously; fine at book-club scale (see `CLAUDE.md`).
