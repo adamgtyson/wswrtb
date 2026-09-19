@@ -1,8 +1,10 @@
-"""Recommendation endpoint: authorization, response parsing, dedup/retry, and metering.
+"""Recommendation endpoint: authorization, parsing, dedup/retry, metering, verification.
 
 Every test mocks the Anthropic client — no real API call is ever made. The mocked client
 also records what was sent, so the tests can assert on the constructed prompt (e.g. that
-the retry carries an exclusion list).
+the retry carries an exclusion list). Google Books is stubbed suite-wide by the autouse
+`fake_google_books` fixture, which by default confirms every book Claude names; the
+Session 4 tests at the bottom opt into the unverifiable and outage cases.
 """
 import asyncio
 import json
@@ -13,7 +15,7 @@ from app import db
 from app.routes import recommend_routes
 from app.services import claude_service
 
-from .conftest import OWNER_PASSWORD, claude_response, register
+from .conftest import FAKE_PAGE_COUNT, OWNER_PASSWORD, claude_response, register
 
 
 def _run(coro):
@@ -469,3 +471,136 @@ def test_config_error_returns_503(client, club, monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     res = _ask(client, club["group_id"], [club["owner_id"]])
     assert res.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Google Books verification (Session 4)
+# ---------------------------------------------------------------------------
+def test_recommendations_carry_google_books_metadata(client, club, fake_claude):
+    """Every returned book is enriched with the real volume's id and metadata."""
+    fake_claude(claude_response(FIVE))
+    res = _ask(client, club["group_id"], [club["owner_id"]])
+
+    assert res.status_code == 200
+    first = res.json()["recommendations"][0]
+    assert first["verified"] is True
+    assert first["google_books_id"] == "gb-alpha"
+    assert first["canonical_title"] == "Alpha"
+    assert first["canonical_authors"] == ["Author of Alpha"]
+    assert first["page_count"] == FAKE_PAGE_COUNT
+    # Covers are served over http by Google; an https page can't load those.
+    assert first["thumbnail_url"].startswith("https://")
+    # Claude's own fields are still there, untouched.
+    assert first["title"] == "Alpha"
+    assert first["reason"]
+
+
+def test_every_candidate_is_looked_up_once(client, club, fake_claude, fake_google_books):
+    """One verification per unique candidate — no duplicate lookups inside a request.
+
+    Compared as a set: lookups run concurrently, so the ORDER they reach Google in is not
+    fixed. The order of the returned books is (asyncio.gather preserves it), and the
+    happy-path test above asserts that.
+    """
+    fake_claude(claude_response(FIVE))
+    _ask(client, club["group_id"], [club["owner_id"]])
+    assert fake_google_books.call_count == 5
+    assert {title for title, _author in fake_google_books.calls} == {
+        "Alpha", "Bravo", "Charlie", "Delta", "Echo"
+    }
+
+
+def test_unverifiable_book_is_dropped_and_the_retry_replaces_it(
+    client, club, fake_claude, fake_google_books
+):
+    """A title Google can't confirm takes the SAME path as a duplicate: drop, then top up.
+
+    This is the core Session 4 behaviour — an invented book never reaches the member, and
+    it reuses Session 3's single retry rather than adding a second loop.
+    """
+    fake_google_books.never_matches("Charlie")
+    fake = fake_claude(claude_response(FIVE), claude_response(_books("Foxtrot")))
+
+    res = _ask(client, club["group_id"], [club["owner_id"]])
+    assert res.status_code == 200
+    titles = [r["title"] for r in res.json()["recommendations"]]
+    assert "Charlie" not in titles
+    assert titles == ["Alpha", "Bravo", "Delta", "Echo", "Foxtrot"]
+    assert fake.call_count == 2
+
+    # The unverifiable title is excluded from the retry too, not just dropped.
+    assert "Charlie" in fake.calls[1]["system"]
+
+
+def test_unverifiable_books_return_a_partial_set_not_a_second_retry(
+    client, club, fake_claude, fake_google_books
+):
+    """Still short after the one retry? Return what verified — never loop."""
+    fake_google_books.never_matches("Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot")
+    fake = fake_claude(claude_response(FIVE), claude_response(_books("Foxtrot")))
+
+    res = _ask(client, club["group_id"], [club["owner_id"]])
+    assert res.status_code == 200
+    assert res.json()["count"] == 0
+    assert fake.call_count == 2  # the fake asserts loudly on a third call
+
+
+def test_google_books_outage_does_not_fail_the_request(
+    client, club, fake_claude, fake_google_books
+):
+    """A third-party outage degrades the response instead of 500ing it.
+
+    The books come back flagged unverified rather than being dropped — an outage is no
+    evidence a book is fake, and dropping everything would empty the page.
+    """
+    fake_google_books.fail()
+    fake = fake_claude(claude_response(FIVE))
+
+    res = _ask(client, club["group_id"], [club["owner_id"]])
+    assert res.status_code == 200
+    body = res.json()
+    assert body["count"] == 5
+    assert all(r["verified"] is False for r in body["recommendations"])
+    assert all(r["google_books_id"] is None for r in body["recommendations"])
+    assert fake.call_count == 1  # a full (if unverified) set needs no retry
+
+
+def test_verified_metadata_is_cached_across_requests(
+    client, club, fake_claude, fake_google_books, fetchone
+):
+    """The second ask for the same books hits api_cache, not the Google Books API."""
+    fake_claude(claude_response(FIVE), claude_response(FIVE))
+
+    assert _ask(client, club["group_id"], [club["owner_id"]]).status_code == 200
+    assert fake_google_books.call_count == 5
+    assert fetchone("SELECT COUNT(*) FROM api_cache")[0] == 5
+
+    assert _ask(client, club["group_id"], [club["owner_id"]]).status_code == 200
+    assert fake_google_books.call_count == 5  # unchanged — every lookup was cached
+
+
+def test_claude_cannot_inject_metadata_fields(client, club, fake_claude):
+    """Metadata is server-side only: a model emitting its own id or cover is ignored.
+
+    Claude's output is parsed as `Recommendation`, which doesn't declare these fields, so
+    they can never survive into `VerifiedRecommendation`.
+    """
+    body = json.dumps(
+        [
+            {
+                "title": "Alpha",
+                "author": "Author of Alpha",
+                "year": 2000,
+                "reason": "r",
+                "google_books_id": "INJECTED",
+                "thumbnail_url": "http://evil.example/tracker.png",
+                "verified": True,
+            }
+        ]
+    )
+    fake_claude(claude_response(body), claude_response(_books("Bravo")))
+    res = _ask(client, club["group_id"], [club["owner_id"]])
+
+    first = res.json()["recommendations"][0]
+    assert first["google_books_id"] == "gb-alpha"
+    assert "evil.example" not in first["thumbnail_url"]

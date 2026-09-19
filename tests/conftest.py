@@ -5,6 +5,11 @@ db.py picks up the temp DB.
 NOTHING in this suite may call the real Anthropic API. Every AI test installs the
 `fake_claude` fixture, which replaces the SDK client entirely — a test run must never
 issue a real request or spend a cent.
+
+The same rule covers Google Books, with one difference: its stub is AUTOUSE, so no test
+can reach that API even by forgetting to ask. `fake_google_books` replaces the service's
+HTTP layer only (`_search`), leaving the cache, matching and enrichment logic under real
+test. Tests that need the HTTP layer itself exercise it through a mocked transport.
 """
 import asyncio
 import os
@@ -32,7 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, db  # noqa: E402
 from app.main import app  # noqa: E402
-from app.services import claude_service  # noqa: E402
+from app.services import claude_service, google_books  # noqa: E402
 
 OWNER_PASSWORD = "ownerpass1"
 
@@ -160,6 +165,79 @@ def fake_claude(monkeypatch):
         return fake
 
     return _install
+
+
+# ---------------------------------------------------------------------------
+# Mocked Google Books client
+# ---------------------------------------------------------------------------
+# Page count and cover used by the synthetic volumes below. The thumbnail is deliberately
+# http:// — Google really does serve them that way, and the service upgrades the scheme.
+FAKE_PAGE_COUNT = 321
+FAKE_THUMBNAIL = "http://books.google.com/books/content?id=fake&img=1"
+FAKE_PUBLISHED_DATE = "2001-05-01"
+
+
+def google_volume(title, author, volume_id=None, subtitle=None):
+    """Build one Google Books API item, shaped like the real `items[]` entries."""
+    info = {
+        "title": title,
+        "authors": [author],
+        "description": "A book that really exists.",
+        "pageCount": FAKE_PAGE_COUNT,
+        "imageLinks": {"thumbnail": FAKE_THUMBNAIL},
+        "publishedDate": FAKE_PUBLISHED_DATE,
+    }
+    if subtitle:
+        info["subtitle"] = subtitle
+    return {"id": volume_id or ("gb-" + title.lower().replace(" ", "-")), "volumeInfo": info}
+
+
+class FakeGoogleBooks:
+    """Stand-in for google_books._search. Records every query; never touches the network.
+
+    Default behaviour is that every book exists — so the tests written before Session 4
+    keep passing unchanged and get verified results. Individual tests opt into the other
+    two outcomes with `never_matches()` (Google answers, nothing matches) and `fail()`
+    (the API is unreachable).
+    """
+
+    def __init__(self):
+        self.calls = []
+        self._unmatchable = set()
+        self._failure = None
+
+    def never_matches(self, *titles):
+        """Make these titles return no usable volume — the 'Claude invented it' case."""
+        self._unmatchable.update(google_books.normalize(t) for t in titles)
+
+    def fail(self, exc=None):
+        """Make every lookup raise — the 'Google Books is down' case."""
+        self._failure = exc or google_books.GoogleBooksUnavailable("simulated outage")
+
+    async def search(self, title, author):
+        self.calls.append((title, author))
+        if self._failure is not None:
+            raise self._failure
+        if google_books.normalize(title) in self._unmatchable:
+            return []
+        return [google_volume(title, author)]
+
+    @property
+    def call_count(self):
+        return len(self.calls)
+
+
+@pytest.fixture(autouse=True)
+def fake_google_books(monkeypatch):
+    """Cut the Google Books network for EVERY test, matched by default.
+
+    Autouse on purpose: an un-stubbed lookup would make a real outbound request, and a
+    test suite that quietly depends on a third party is a test suite that fails on a
+    train. Patching `_search` leaves caching, fuzzy matching and enrichment real.
+    """
+    fake = FakeGoogleBooks()
+    monkeypatch.setattr(google_books, "_search", fake.search)
+    return fake
 
 
 def register(client, code, email="member@example.com", password="password1",
