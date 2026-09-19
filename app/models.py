@@ -31,6 +31,16 @@ _MAX_REASON_LEN = 1000
 _MIN_BOOK_YEAR = 1
 _MAX_BOOK_YEAR = 2100
 
+# Bounds on the Google Books metadata merged in during Session 4. The values come from
+# Google rather than a client, so these are sanity caps (and a guard against an oversized
+# response) rather than trust boundaries.
+_MAX_VOLUME_ID_LEN = 64
+_MAX_DESCRIPTION_LEN = 2000
+_MAX_URL_LEN = 500
+_MAX_AUTHORS = 20
+_MAX_PAGE_COUNT = 50_000
+_MAX_PUBLISHED_DATE_LEN = 32
+
 
 def _clean_string_list(value: list) -> list[str]:
     """Strip, drop empties, enforce per-item length and list-length caps."""
@@ -197,8 +207,9 @@ class RecommendRequest(BaseModel):
 class Recommendation(BaseModel):
     """One book Claude returned. Validates the model's output — never trusted as-is.
 
-    Session 4 adds a `google_books_id` here once there is a way to verify it against the
-    Google Books API; asking for an unverifiable id now would be worse than not asking.
+    This is the contract for the MODEL's output only — the four fields it is asked for,
+    and nothing else. Verified Google Books metadata is added by `VerifiedRecommendation`
+    below, which is what the route actually returns.
     """
 
     title: str = Field(..., min_length=1, max_length=_MAX_BOOK_FIELD_LEN)
@@ -227,9 +238,37 @@ class Recommendation(BaseModel):
         return None
 
 
+class VerifiedRecommendation(Recommendation):
+    """One recommendation after Google Books verification (Session 4).
+
+    Deliberately a SUBCLASS rather than extra optional fields on `Recommendation`.
+    Claude's raw output is parsed as `Recommendation`, and Pydantic ignores keys it does
+    not declare — so a model that decides to emit its own `thumbnail_url` or
+    `google_books_id` cannot get it into a response. Every field below is set
+    server-side from a volume the Google Books API actually returned, or not at all.
+
+    `verified` is False when the book could not be confirmed. Today that means only one
+    thing: Google Books was unreachable when we asked. A book that Google answered about
+    and did not match is dropped in the route, never returned with verified=False.
+    """
+
+    google_books_id: Optional[str] = Field(default=None, max_length=_MAX_VOLUME_ID_LEN)
+    canonical_title: Optional[str] = Field(default=None, max_length=_MAX_BOOK_FIELD_LEN)
+    canonical_authors: list[str] = Field(default_factory=list, max_length=_MAX_AUTHORS)
+    description: Optional[str] = Field(default=None, max_length=_MAX_DESCRIPTION_LEN)
+    page_count: Optional[int] = Field(default=None, gt=0, le=_MAX_PAGE_COUNT)
+    thumbnail_url: Optional[str] = Field(default=None, max_length=_MAX_URL_LEN)
+    published_date: Optional[str] = Field(default=None, max_length=_MAX_PUBLISHED_DATE_LEN)
+    verified: bool = False
+
+
 class RecommendationResponse(BaseModel):
-    """Response payload for a recommendation request."""
+    """Response payload for a recommendation request.
+
+    Every entry carries Claude's own fields plus whatever Google Books confirmed, so the
+    client never has to ask a second endpoint to render a book.
+    """
 
     group_id: int
     count: int
-    recommendations: list[Recommendation]
+    recommendations: list[VerifiedRecommendation]

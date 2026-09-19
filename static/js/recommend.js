@@ -67,15 +67,36 @@
   }
 
   // ---- Results ----
+  // Session 4 added verified Google Books metadata to each result. This stays the rough
+  // placeholder it always was — a cover, a page count and an unverified flag, nothing
+  // more. The real book cards are Session 5's job.
   function renderResults(recommendations) {
     resultsList.textContent = "";
     recommendations.forEach((rec) => {
       const li = document.createElement("li");
+
+      if (rec.thumbnail_url) {
+        const cover = document.createElement("img");
+        cover.className = "cover";
+        cover.src = rec.thumbnail_url;
+        cover.alt = "Cover of " + rec.title;
+        cover.loading = "lazy";
+        li.appendChild(cover);
+      }
+
       const meta = el("div", "meta");
       const heading = rec.year ? rec.title + " (" + rec.year + ")" : rec.title;
       meta.appendChild(el("span", "name", heading));
       meta.appendChild(el("span", "sub", "by " + rec.author));
+      if (rec.page_count) {
+        meta.appendChild(el("span", "sub", rec.page_count + " pages"));
+      }
       meta.appendChild(el("span", "sub", rec.reason));
+      // Only shown when Google Books was unreachable — the book itself is unchecked.
+      if (!rec.verified) {
+        meta.appendChild(el("span", "pill", "Unverified"));
+      }
+
       li.appendChild(meta);
       resultsList.appendChild(li);
     });

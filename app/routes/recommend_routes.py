@@ -13,10 +13,16 @@ a model's compliance is not an authorization or correctness guarantee:
   * Duplicates — results are deduped on a normalized (title, author) key.
   * Named titles/authors — anything the member named in their own prompt is filtered out
     of the results even if Claude ignores the instruction not to recommend it.
+  * Existence (Session 4) — every surviving candidate is resolved against Google Books
+    and dropped if it cannot be confidently matched. A model producing a plausible
+    string is not evidence the book exists; the metadata that comes back with a match is
+    what the client renders.
 
 Every Claude call (including the single retry) goes through services/claude_service.py,
-which meters cost and rate limits and logs usage. Nothing here touches the SDK.
+which meters cost and rate limits and logs usage. Nothing here touches the SDK. Likewise
+every Google Books call goes through services/google_books.py.
 """
+import asyncio
 import json
 import logging
 import re
@@ -28,8 +34,13 @@ from pydantic import ValidationError
 
 from app import db
 from app.deps import require_membership
-from app.models import Recommendation, RecommendationResponse, RecommendRequest
-from app.services import claude_service
+from app.models import (
+    Recommendation,
+    RecommendationResponse,
+    RecommendRequest,
+    VerifiedRecommendation,
+)
+from app.services import claude_service, google_books
 
 logger = logging.getLogger(__name__)
 
@@ -230,19 +241,73 @@ def named_in_prompt(rec: Recommendation, normalized_prompt: str) -> bool:
     return False
 
 
-def _accept(
+# ---------------------------------------------------------------------------
+# Google Books verification
+# ---------------------------------------------------------------------------
+def _merge_metadata(rec: Recommendation, metadata: dict | None) -> VerifiedRecommendation:
+    """Build the response model for one book: Claude's fields plus verified metadata.
+
+    With `metadata` None the book is returned UNVERIFIED (verified=False, no Google
+    fields) — reached only when Google Books itself was unreachable. Claude's title and
+    author stay the displayed values either way; the canonical ones ride alongside so
+    Session 5's cards can prefer them without this route rewriting what the model said.
+    """
+    if metadata is None:
+        return VerifiedRecommendation(**rec.model_dump())
+    return VerifiedRecommendation(**rec.model_dump(), verified=True, **metadata)
+
+
+async def _verify(rec: Recommendation) -> VerifiedRecommendation | None:
+    """Resolve one candidate against Google Books (cache-first).
+
+    Three outcomes, mirroring the service's three:
+      * enriched VerifiedRecommendation — confidently matched a real volume.
+      * None — Google answered and nothing matched. The book is probably invented; the
+        caller drops it and the existing single retry asks for a replacement.
+      * unverified VerifiedRecommendation — Google Books was DOWN. An outage is not
+        evidence a book is fake, so the request degrades rather than silently emptying
+        the member's results. Logged at warning level, because it means someone may be
+        looking at a book nothing has checked.
+    """
+    try:
+        metadata = await google_books.lookup(rec.title, rec.author)
+    except google_books.GoogleBooksUnavailable as exc:
+        logger.warning(
+            "Google Books unavailable (%s) — returning '%s' by %s UNVERIFIED",
+            exc,
+            rec.title,
+            rec.author,
+        )
+        return _merge_metadata(rec, None)
+
+    if metadata is None:
+        logger.info(
+            "Dropping '%s' by %s — no confident Google Books match", rec.title, rec.author
+        )
+        return None
+    return _merge_metadata(rec, metadata)
+
+
+async def _accept(
     candidates: list[Recommendation],
-    accepted: list[Recommendation],
+    accepted: list[VerifiedRecommendation],
     seen_keys: set,
     seen_titles: list[str],
     normalized_prompt: str,
 ) -> None:
-    """Fold `candidates` into `accepted`, dropping duplicates and prompt-named books.
+    """Fold `candidates` into `accepted`: dedup, prompt-filter, then verify.
 
     Mutates `accepted`, `seen_keys`, and `seen_titles` in place. Every candidate title is
-    recorded in `seen_titles` — including rejected ones — so the retry call can exclude
-    everything already suggested, not just what survived.
+    recorded in `seen_titles` — including ones dropped as duplicates, as prompt-named, or
+    as unverifiable — so the retry call excludes everything already tried, not just what
+    survived. That is why short-by-dedup and short-by-unverified need no separate retry
+    paths: both simply leave `accepted` short of the target.
+
+    Verification runs concurrently: each unseen candidate can cost an HTTP round trip, and
+    five of those in series would add seconds to a request that already waited on Claude.
+    `gather` preserves order, so the result order is still Claude's.
     """
+    survivors: list[Recommendation] = []
     for rec in candidates:
         seen_titles.append(rec.title)
         key = _dedupe_key(rec)
@@ -252,7 +317,12 @@ def _accept(
         if named_in_prompt(rec, normalized_prompt):
             logger.info("Filtered '%s' — named in the member's own prompt", rec.title)
             continue
-        accepted.append(rec)
+        survivors.append(rec)
+
+    if not survivors:
+        return
+    verified = await asyncio.gather(*(_verify(rec) for rec in survivors))
+    accepted.extend(rec for rec in verified if rec is not None)
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +333,11 @@ def _accept(
     summary="Get book recommendations for selected group members",
     description=(
         "Combines the stored preference profiles of the selected members with a free-text "
-        "prompt and returns up to five validated book recommendations. Every selected "
-        "member must belong to the group. Metered: the call counts against the caller's "
-        "AI rate limits and the global daily cost ceiling."
+        "prompt and returns up to five book recommendations, each verified against Google "
+        "Books and enriched with its real metadata (id, cover, description, page count). "
+        "Every selected member must belong to the group. Metered: the call counts against "
+        "the caller's AI rate limits and the global daily cost ceiling. Books that cannot "
+        "be verified are dropped, so fewer than five may come back."
     ),
     response_model=RecommendationResponse,
     tags=["recommendations"],
@@ -275,13 +347,16 @@ async def recommend_books(
 ) -> RecommendationResponse:
     """Ask Claude for `RECOMMENDATION_COUNT` books for the selected members.
 
-    Runs one metered Claude call, parses and validates the response, dedupes it, and
-    filters out anything the member named in their own prompt. If that leaves fewer than
-    the target count, makes exactly ONE more call with the already-seen titles as an
-    exclusion list and returns whatever survives.
+    Runs one metered Claude call, parses and validates the response, dedupes it, filters
+    out anything the member named in their own prompt, and verifies what is left against
+    Google Books. If that leaves fewer than the target count — for any of those reasons —
+    makes exactly ONE more call with the already-seen titles as an exclusion list and
+    returns whatever survives. A still-short set is returned as a partial rather than
+    discarding calls the user has already been charged for.
 
     Returns 400 if a selected user is not a member of this group, 429 if a cost/rate limit
-    refused the call, 502 if Claude failed or returned an unusable response.
+    refused the call, 502 if Claude failed or returned an unusable response. A Google
+    Books outage is not an error here: those books come back with `verified: false`.
     """
     group_id = ctx["group_id"]
     user_id = ctx["user"]["id"]
@@ -297,7 +372,7 @@ async def recommend_books(
         )
 
     normalized_prompt = _normalize(body.prompt)
-    accepted: list[Recommendation] = []
+    accepted: list[VerifiedRecommendation] = []
     seen_keys: set = set()
     seen_titles: list[str] = []
 
@@ -308,14 +383,17 @@ async def recommend_books(
         system_prompt=_build_system_prompt(profiles),
         user_prompt=body.prompt,
     )
-    _accept(parse_recommendations(raw), accepted, seen_keys, seen_titles, normalized_prompt)
+    await _accept(
+        parse_recommendations(raw), accepted, seen_keys, seen_titles, normalized_prompt
+    )
 
     # One top-up attempt only — bounded retry, never a loop.
     for _ in range(MAX_RETRY_CALLS):
         if len(accepted) >= RECOMMENDATION_COUNT:
             break
         logger.info(
-            "Only %s of %s recommendations survived dedup/filtering — retrying once",
+            "Only %s of %s recommendations survived dedup/filtering/verification "
+            "— retrying once",
             len(accepted),
             RECOMMENDATION_COUNT,
         )
@@ -327,7 +405,7 @@ async def recommend_books(
                 system_prompt=_build_system_prompt(profiles, exclusions=seen_titles),
                 user_prompt=body.prompt,
             )
-            _accept(
+            await _accept(
                 parse_recommendations(raw), accepted, seen_keys, seen_titles, normalized_prompt
             )
         except (claude_service.AILimitError, claude_service.ClaudeServiceError) as exc:

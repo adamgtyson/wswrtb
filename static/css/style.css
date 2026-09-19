@@ -164,6 +164,9 @@ a { color: var(--accent); }
 .list .name { font-weight: 600; overflow-wrap: anywhere; }
 .list .sub { color: var(--muted); font-size: 0.85rem; overflow-wrap: anywhere; }
 .list .actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+/* Google Books cover thumbnails (Session 4). Fixed width so a list of results lines up
+   whatever size Google serves; height follows the cover's own aspect ratio. */
+.list .cover { width: 56px; height: auto; flex-shrink: 0; border-radius: 3px; }
 
 .pill { font-size: 0.72rem; font-weight: 700; padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .pill.owner { color: var(--accent); border-color: var(--accent); }

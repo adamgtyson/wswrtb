@@ -77,6 +77,12 @@ tests/                 pytest suite (onboarding, group management, hardening, AI
 - The JSON preference columns are the **single source of truth** for a member's
   profile. A future conversational (Claude) discovery layer must augment these SAME
   columns — do not fork the data model.
+- **All Anthropic API access goes through `app/services/claude_service.py`.** It is the
+  only module that imports the `anthropic` SDK — cost control depends on there being
+  exactly one path a request can take.
+- **All Google Books access goes through `app/services/google_books.py`.** Same
+  single-chokepoint rule, same reason: one place to cache, throttle, or swap the
+  provider, and one place to audit.
 
 ### Runtime / tooling notes
 
