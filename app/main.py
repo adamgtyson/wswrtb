@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from app import db
 from app.auth import COOKIE_NAME, NeedsLoginException
 from app.routes.auth_routes import router as auth_router
+from app.routes.feedback_routes import router as feedback_router
 from app.routes.group_routes import router as group_router
 from app.routes.profile_routes import router as profile_router
 from app.routes.recommend_routes import router as recommend_router
@@ -128,6 +129,7 @@ app.include_router(auth_router)
 app.include_router(profile_router)
 app.include_router(group_router)
 app.include_router(recommend_router)
+app.include_router(feedback_router)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

@@ -46,6 +46,12 @@ LOGIN_WINDOW_SECONDS = _int_env("RATE_LIMIT_LOGIN_WINDOW", 15 * 60)  # 15 minute
 INVITE_CREATE_LIMIT = _int_env("RATE_LIMIT_INVITE_CREATE", 20)
 INVITE_CREATE_WINDOW_SECONDS = _int_env("RATE_LIMIT_INVITE_CREATE_WINDOW", 60 * 60)  # 1 hour
 
+# Feedback writes (Session 5). Deliberately loose compared with the others: rating books
+# is a normal, repeated UI action, not a credential or resource-creation path, so this
+# bucket exists to bound a runaway script rather than to police ordinary use.
+FEEDBACK_LIMIT = _int_env("RATE_LIMIT_FEEDBACK", 120)
+FEEDBACK_WINDOW_SECONDS = _int_env("RATE_LIMIT_FEEDBACK_WINDOW", 60 * 60)  # 1 hour
+
 
 class RateLimitError(Exception):
     """Raised when a bucket exceeds its limit within the window. Mapped to HTTP 429.

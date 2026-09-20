@@ -41,6 +41,10 @@ _MAX_AUTHORS = 20
 _MAX_PAGE_COUNT = 50_000
 _MAX_PUBLISHED_DATE_LEN = 32
 
+# Feedback bounds (Session 5). The title cap matches _MAX_BOOK_FIELD_LEN because a rating
+# is keyed on the title the recommendation displayed — the two must accept the same value.
+_MAX_WATCHING_NAMES = 50
+
 
 def _clean_string_list(value: list) -> list[str]:
     """Strip, drop empties, enforce per-item length and list-length caps."""
@@ -271,4 +275,105 @@ class RecommendationResponse(BaseModel):
 
     group_id: int
     count: int
+    recommendations: list[VerifiedRecommendation]
+
+
+# ---------------------------------------------------------------------------
+# Feedback (Session 5)
+# ---------------------------------------------------------------------------
+class FeedbackRequest(BaseModel):
+    """A member's thumbs up/down on one book.
+
+    Stored only — nothing reads these ratings back into a prompt this session, so this
+    schema is about validating what lands in the `feedback` table, not about influencing
+    a recommendation.
+
+    `title` is the identity of the rating (the table's uniqueness key is
+    (user_id, title)), so the client must send the SAME title the recommendation carried
+    — Claude's `title`, not the Google Books canonical one, which may differ by a
+    subtitle and would silently create a second row for the same book.
+    """
+
+    title: str = Field(..., min_length=1, max_length=_MAX_BOOK_FIELD_LEN)
+    author: Optional[str] = Field(default=None, max_length=_MAX_BOOK_FIELD_LEN)
+    google_books_id: Optional[str] = Field(default=None, max_length=_MAX_VOLUME_ID_LEN)
+    rating: Literal[-1, 1]
+
+    @field_validator("title")
+    @classmethod
+    def _clean_title(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("title must not be blank")
+        return v
+
+    @field_validator("author", "google_books_id")
+    @classmethod
+    def _blank_to_none(cls, v: Optional[str]) -> Optional[str]:
+        """Treat a blank/whitespace value as absent so it cannot blank out stored data."""
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+
+class FeedbackResponse(BaseModel):
+    """The stored rating, echoed back so the client can confirm what it now holds."""
+
+    title: str
+    rating: Literal[-1, 1]
+
+
+class FeedbackMapResponse(BaseModel):
+    """Existing ratings for a set of titles, as {title: rating}.
+
+    Only rated titles appear — an absent key means unrated, which is a different state
+    from a rating of 0 (which the table's CHECK constraint does not permit anyway).
+    """
+
+    ratings: dict[str, int]
+
+
+# ---------------------------------------------------------------------------
+# Recent searches (Session 5)
+# ---------------------------------------------------------------------------
+class RecentSearchSummary(BaseModel):
+    """One entry in the recent-searches menu.
+
+    Carries no results: the stored payload is fetched only when a member opens a specific
+    entry, so listing history costs one small query no matter how big the result sets were.
+    """
+
+    id: int
+    prompt: str
+    result_count: int
+    watching: list[str] = Field(default_factory=list, max_length=_MAX_WATCHING_NAMES)
+    created_at: str
+
+
+class RecentSearchListResponse(BaseModel):
+    """The caller's own recent searches for one group, newest first."""
+
+    group_id: int
+    count: int
+    searches: list[RecentSearchSummary]
+
+
+class RecentSearchDetail(BaseModel):
+    """A stored search replayed from history — the same books, no new AI call.
+
+    `created_at` is part of the contract, not decoration: the client is required to show
+    it, because a saved result set is visually identical to a fresh one and a member who
+    mistakes stale covers for new recommendations is the failure mode this feature has.
+    The recommendations are re-validated through `VerifiedRecommendation` on the way out,
+    so a row written by an older version of the app cannot put an unexpected shape on the
+    wire.
+    """
+
+    id: int
+    group_id: int
+    prompt: str
+    result_count: int
+    watching: list[str] = Field(default_factory=list, max_length=_MAX_WATCHING_NAMES)
+    created_at: str
     recommendations: list[VerifiedRecommendation]
