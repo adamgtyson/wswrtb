@@ -118,10 +118,13 @@ pass — sliding-window limiter, indexed on `(bucket, created_at)`), and `ai_usa
 `(created_at)` for the per-user count and global daily-sum queries), and `api_cache`
 (Session 4 — one row per verified Google Books volume, keyed on a normalized
 `google_books:<title>|<author>` string; the `cache_key` primary key is the only index it
-needs). `users.plan` is now read too (free-tier monthly allowance). The rest
-(`feedback`, `reading_list`, `voting_rounds`, `ballots`, `recent_searches`, `flags`) are
-**forward-declared** — created now, unused. No table or column has ever been altered,
-`api_cache` included: its four columns fit the cache as declared in Session 1.
+needs), and `feedback` + `recent_searches` (Session 5 — ratings keyed on
+`(user_id, title)` with no group dimension, and one stored result set per search, indexed
+on `user_id` and `(user_id, group_id, created_at)` respectively). `users.plan` is now read
+too (free-tier monthly allowance). The rest (`reading_list`, `voting_rounds`, `ballots`,
+`flags`) are **forward-declared** — created now, unused. No table or column has ever been
+altered, `api_cache`, `feedback` and `recent_searches` included: each fits its feature as
+declared in Session 1, and the only additions have been `CREATE INDEX IF NOT EXISTS`.
 
 Invite model: `invite_codes` (seat-limited, multi-redemption) + `invite_redemptions`
 (one row per successful redemption, audit trail + UNIQUE guard). This supersedes any
@@ -131,7 +134,7 @@ single-use `invites` table. One invite code maps to one group.
 
 ## Current Build State
 
-_Sessions 1–4 + the pre-Session-3 hardening pass complete. 127 tests passing, 93% coverage._
+_Sessions 1–5 + the pre-Session-3 hardening pass complete. 175 tests passing, 94% coverage._
 
 **Session 1 — Scaffold + Code-Gated Onboarding:**
 
@@ -152,33 +155,21 @@ _Sessions 1–4 + the pre-Session-3 hardening pass complete. 127 tests passing, 
 - **Profile** (`app/routes/profile_routes.py`, `app/models.py`): structured builder
   persisted as JSON columns on `users`; round-trips across logout/login.
 - **Seed script** (`scripts/seed_group.py`): creates the FIRST owner + group + owner
-  membership + seat-limited invite code. Unchanged this session.
+  membership + seat-limited invite code.
 
 **Session 2 — Owner/Admin Member Management (in-app tooling after the first code):**
 
-- **Authorization** (`app/deps.py`): `require_membership(...)` (any member) and the new
+- **Authorization** (`app/deps.py`): `require_membership(...)` (any member) and
   `require_owner(...)` (role = `'owner'`). Both resolve role server-side from the JWT +
   `memberships` table; owner-only endpoints 403 for members and cross-tenant owners.
-- **Member routes** (`app/routes/group_routes.py`):
-  - `GET /api/groups/{id}/members` — any member sees the roster (display_name, role,
-    joined_at); **emails only for owners**.
-  - `DELETE /api/groups/{id}/members/{user_id}` — owner-only; deletes just the
-    membership row (account/profile untouched); **refuses to remove the owner (400)**;
-    non-member removal is 404.
-- **Invite-code routes** (owner-only, same file): `GET` list, `POST` create (optional
-  custom code via the shared Session 1 normalizer; seats 1–200; random if omitted;
-  409 on duplicate; multiple active codes per group allowed), `PATCH .../deactivate`
-  (manual `active=0`, idempotent no-op, 404 for a code not in the group).
-- `GET /api/groups/{id}` extended to include the caller's `role` (authorization
-  unchanged); `GET /api/me/groups` added so the page resolves the user's group(s).
-- **Frontend**: `static/group.html` + `group.js` — roster for all; owners get per-member
-  two-click Remove and an invite-code panel (seat usage, active/inactive, deactivate,
-  create form). All user text via `textContent` (no innerHTML). `/group` linked from the
-  profile nav.
-- **DoD verified live**: owner views roster with emails, removes a member (who keeps
-  their account/profile but loses group access), creates a new code, a member registers
-  on it, owner deactivates it and further registration is refused (400); non-owners see
-  no emails and 403 on owner endpoints.
+- **Member routes** (`app/routes/group_routes.py`): `GET .../members` (roster for all
+  members; **emails only for owners**), `DELETE .../members/{user_id}` (owner-only,
+  deletes just the membership row, **refuses to remove the owner**, 404 for a non-member).
+- **Invite-code routes** (owner-only): `GET` list, `POST` create (optional custom code,
+  seats 1–200, 409 on duplicate), `PATCH .../deactivate` (idempotent).
+- `GET /api/groups/{id}` includes the caller's `role`; `GET /api/me/groups` added.
+- **Frontend**: `static/group.html` + `group.js` — roster for all; owners get two-click
+  Remove and an invite-code panel. All user text via `textContent`.
 
 **Pre-Session-3 Hardening Pass — abuse-resistance (not AI cost control):**
 
@@ -186,145 +177,157 @@ _Sessions 1–4 + the pre-Session-3 hardening pass complete. 127 tests passing, 
   SQLite-backed sliding-window limiter — **deliberately not in-memory**, because
   Gunicorn workers have separate memory (an in-process counter would let each worker
   grant the full quota and reset on restart). `check_and_record(bucket, limit, window)`
-  runs count-then-insert inside `BEGIN IMMEDIATE` (racing requests on a bucket serialize),
-  evaluates the window in SQL, and opportunistically prunes the bucket's expired rows.
-  Wired onto `POST /api/register` (by IP, default 5/hr), `POST /api/login` (by IP,
-  10/15min), and `POST /api/groups/{id}/invite-codes` (by owner id, 20/hr). Limits are
-  env-configurable; a trip raises `RateLimitError` → global **HTTP 429** (generic).
-  `client_ip()` flags that `X-Forwarded-For` handling is deferred until the Nginx proxy
-  exists (Session 7) — trusting it now would let clients spoof their IP.
+  runs count-then-insert inside `BEGIN IMMEDIATE`, evaluates the window in SQL, and
+  opportunistically prunes the bucket's expired rows. Wired onto `POST /api/register`
+  (by IP, 5/hr), `POST /api/login` (by IP, 10/15min), `POST .../invite-codes` (by owner
+  id, 20/hr), and — Session 5 — `PUT`/`DELETE /api/feedback` (by user id, 120/hr).
+  Limits are env-configurable; a trip raises `RateLimitError` → global **HTTP 429**.
+  `client_ip()` flags that `X-Forwarded-For` handling is deferred until Nginx (Session 7).
 - **CORS** (`app/main.py`): `CORSMiddleware` with an explicit `ALLOWED_ORIGINS` whitelist
-  from `.env` (no wildcards; `allow_credentials=True` for cookie auth; methods/headers
-  restricted to what the app uses). Production must set the real deployed origin(s).
-- **DoD verified live**: 6th registration from one IP returns 429 (default limit);
-  whitelisted origin gets an echoing `Access-Control-Allow-Origin`, unlisted origin gets
-  none; seed script now uses the shared `generate_code`.
+  from `.env` (no wildcards; `allow_credentials=True`; methods/headers restricted).
 
 **Session 3 — Metered Claude service + recommendation engine:**
 
 - **Metered AI** (`app/services/claude_service.py`): the ONLY module that imports the
-  `anthropic` SDK — nothing else may call it directly. `complete_text(...)` runs four
-  checks (in order, each its own exception → generic **HTTP 429**) before any request:
-  the **global daily cost ceiling** (`AI_DAILY_COST_CEILING_USD`, default $5) summed
-  across ALL users for the UTC day — a kill switch, not a per-user limit; then the
-  caller's **hourly** (15) and **daily** (50) request counts; then, for `plan = 'free'`
-  users, a rolling-30-day count (`FREE_TIER_MONTHLY_AI_REQUESTS`, 15 — the binding
-  constraint in practice, since everyone is 'free'). Every check is a fresh `ai_usage`
-  query — **no in-memory state anywhere**, same Gunicorn-workers reasoning as
-  `rate_limit_events`, but deliberately a **separate table**: that one is the generic
-  abuse throttle, this one carries tokens and cost. After a successful call it writes one
-  `ai_usage` row with the **real** `input_tokens`/`output_tokens` from the response and
-  `est_cost_usd` from named per-MTok pricing constants (`claude-haiku-4-5`: $1 in / $5
-  out — **must be revisited if Anthropic's pricing changes**, flagged in code).
-  `max_tokens` and the max prompt length are named constants. A missing
-  `ANTHROPIC_API_KEY` raises → **503**; an upstream/parse failure → **502**. Never
-  degrades silently.
+  `anthropic` SDK. `complete_text(...)` runs four checks (each its own exception →
+  generic **HTTP 429**) before any request: the **global daily cost ceiling**
+  (`AI_DAILY_COST_CEILING_USD`, default $5) summed across ALL users for the UTC day — a
+  kill switch, not a per-user limit; then the caller's **hourly** (15) and **daily** (50)
+  request counts; then, for `plan = 'free'` users, a rolling-30-day count
+  (`FREE_TIER_MONTHLY_AI_REQUESTS`, 15 — the binding constraint in practice). Every check
+  is a fresh `ai_usage` query — **no in-memory state anywhere**. After a successful call
+  it writes one `ai_usage` row with the **real** token counts and `est_cost_usd` from
+  named per-MTok pricing constants (`claude-haiku-4-5`: $1 in / $5 out — **must be
+  revisited if Anthropic's pricing changes**). A missing `ANTHROPIC_API_KEY` → **503**;
+  an upstream/parse failure → **502**. Never degrades silently.
 - **Recommendations** (`app/routes/recommend_routes.py`): `POST /api/groups/{id}/recommend`
-  behind `require_membership`. Body is `{prompt, member_user_ids}`; every selected id is
-  resolved through the group's membership rows, so a cross-tenant id is a **400** before
-  any spend. The system prompt is built from the selected members' stored profile columns
-  (emails never enter a prompt), states genre as a **hard constraint**, and forbids
-  recommending anything the member named themselves. Three rules are then enforced
-  **server-side** rather than trusted to the model: markdown fences stripped before
-  `json.loads` + per-entry Pydantic validation (malformed → 502, not a crash); dedup on
-  normalized `(title, author)`; and a filter dropping any title/author named in the raw
-  prompt. Short of five, it makes **exactly one** retry with the seen titles as an
-  exclusion list — a failed top-up returns the partial set rather than discarding an
-  already-billed call. No `google_books_id` this session (Session 4 adds verification).
-- **Frontend**: `static/recommend.html` + `recommend.js` — deliberate placeholder (member
-  checkboxes, prompt box, plain-text results), linked from `/group` and `/profile`.
-  Session 5 replaces it with real book cards.
-- **Tests**: 51 new, **every Anthropic call mocked** — the fake client asserts on any
-  unexpected extra call, so a test run can never hit the API or spend from the workspace
-  cap. Covers all four limits (incl. one user's spend blocking a different user), usage
-  logging with real token counts, cross-tenant rejection, fence-stripping/parsing, and
-  dedup + single-retry.
+  behind `require_membership`. Every selected id is resolved through the group's
+  membership rows, so a cross-tenant id is a **400** before any spend. The system prompt
+  is built from the selected members' stored profile columns (emails never enter a
+  prompt) and states genre as a **hard constraint**. Three rules are enforced
+  **server-side** rather than trusted to the model: fence-stripping + per-entry Pydantic
+  validation (malformed → 502), dedup on normalized `(title, author)`, and a filter
+  dropping any title/author named in the raw prompt. Short of five, **exactly one** retry
+  carrying the seen titles as exclusions; a failed top-up returns the partial set.
 
 **Session 4 — Google Books verification + metadata enrichment:**
 
 - **Lookup service** (`app/services/google_books.py`): the ONLY module that calls Google
-  Books — the same single-chokepoint rule as `claude_service.py`, so caching, throttling
-  or a provider swap all have one home. `lookup(title, author)` has **three** outcomes and
-  callers must handle all three: a metadata dict (confident match), `None` (the API
-  answered and nothing matched — Claude probably invented the book), and
-  `GoogleBooksUnavailable` (the API could not be reached, which is no evidence either
-  way). Conflating the last two is the bug this design exists to prevent.
-  One request per lookup: a free-text `q` of title + author rather than strict
-  `intitle:`/`inauthor:` operators, with precision recovered afterwards by matching.
+  Books. `lookup(title, author)` has **three** outcomes and callers must handle all
+  three: a metadata dict (confident match), `None` (the API answered and nothing matched
+  — Claude probably invented the book), and `GoogleBooksUnavailable` (unreachable, which
+  is no evidence either way). Conflating the last two is the bug this design prevents.
   **Matching** is word containment over punctuation-stripped, lowercased strings —
-  `MATCH_THRESHOLD` 0.8 on **both** title and author. Word containment, not character
-  similarity, because the difference between Claude and Google is almost always extra
-  words (a subtitle, a series tag): "Dune" vs "Dune: Book One of the Dune Chronicles"
-  scores 1.0 where a character ratio would score ~0.3 and throw away a correct match.
-  Requiring the author too is what rejects study guides and parodies. Extracted fields
-  are only what the UI renders (`google_books_id`, canonical title/authors, description,
-  page count, cover, published date) — the request even sends a `fields` mask so Google
-  doesn't return the rest. Two real-world details handled: descriptions are truncated
-  (`MAX_DESCRIPTION_CHARS`), and `http://` cover URLs are upgraded to `https://` or the
-  browser blocks them as mixed content. `GOOGLE_BOOKS_API_KEY` is **optional** — keyless
-  works at a lower rate limit, and the app must never fail to start without it.
-- **`api_cache` wired up** (`db.get_api_cache` / `db.set_api_cache`): the forward-declared
-  table from Session 1, used as-is — no schema change. Keyed on
-  `google_books:<normalized title>|<normalized author>`, so casing and punctuation don't
-  split one book across two rows. Cache-first on every lookup; an expired or corrupt row
-  is treated as a miss and overwritten (upsert, so the table holds one row per book). A
-  cache write that fails is logged and ignored — the cache is an optimization, never a
-  dependency. **TTL defaults to 60 days** (`API_CACHE_TTL_DAYS`), a deliberate deviation
-  from the original "cache 24h" planning note: book metadata does not change, so expiry
-  is insurance against a permanently stale row, not a freshness requirement. The reasoning
-  is in a code comment so a later session doesn't "fix" it back. **Only confident matches
-  are cached** — caching a no-match for weeks would keep rejecting a book Google might
-  list tomorrow.
-- **Wired into the route** (`app/routes/recommend_routes.py`): after dedup and the
-  prompt-named filter, each survivor is verified (concurrently — `asyncio.gather`, which
-  preserves order, so five lookups don't add five round trips in series). An unverifiable
-  book takes **exactly the same path as a duplicate**: its title is already in
-  `seen_titles`, so Session 3's single retry tops the set back up with the dropped title
-  in the exclusion list. **No second retry loop was added.** Still short after that one
-  retry returns the partial set — same philosophy as Session 3, same reason (never
-  discard an already-billed call). A Google Books **outage** returns those books with
-  `verified: false` and no metadata rather than 500ing or emptying the page; it is logged
-  at warning level because it means a member may be looking at an unchecked title.
-- **Response shape** (`app/models.py`): `VerifiedRecommendation` extends `Recommendation`
-  with `google_books_id`, `canonical_title`, `canonical_authors`, `description`,
-  `page_count`, `thumbnail_url`, `published_date`, `verified`. Deliberately a **subclass**
-  rather than optional fields on `Recommendation`: Claude's raw output is parsed as
-  `Recommendation`, which doesn't declare them, so a model that emits its own
-  `thumbnail_url` cannot get it into a response. Claude's `title`/`author` stay the
-  displayed values; the canonical ones ride alongside for Session 5 to prefer.
-- **Frontend**: `static/js/recommend.js` gets the minimum change to consume the new
-  fields — cover thumbnail, page count, and an "Unverified" pill. Still the placeholder;
-  real book cards are Session 5.
-- **Tests**: 35 new (127 total, 93% coverage). The Google Books stub is **autouse**, so no
-  test can reach the real API even by forgetting to ask for it; it replaces the HTTP layer
-  only, leaving cache, matching and enrichment under real test, and the tests that
-  exercise the HTTP layer itself route httpx through a `MockTransport`.
+  `MATCH_THRESHOLD` 0.8 on **both** title and author, because the difference between
+  Claude and Google is almost always extra words (a subtitle, a series tag).
+  `GOOGLE_BOOKS_API_KEY` is **optional** in code — the app must never fail to start
+  without it — but see the housekeeping note: it is required in practice.
+- **`api_cache` wired up**: keyed on `google_books:<normalized title>|<normalized author>`,
+  cache-first, upsert, corrupt/expired rows treated as a miss. A cache write that fails is
+  logged and ignored. **TTL 60 days** (`API_CACHE_TTL_DAYS`) — book metadata does not
+  change, so expiry is insurance against a permanently stale row. **Only confident
+  matches are cached.**
+- **Wired into the route**: each survivor is verified concurrently (`asyncio.gather`,
+  which preserves order). An unverifiable book takes **exactly the same path as a
+  duplicate** — its title is already in `seen_titles`, so Session 3's single retry tops
+  the set back up. **No second retry loop.** A Google Books outage returns those books
+  with `verified: false` rather than 500ing or emptying the page.
+- **Response shape** (`app/models.py`): `VerifiedRecommendation` extends `Recommendation`.
+  Deliberately a **subclass** rather than optional fields: Claude's raw output is parsed
+  as `Recommendation`, which doesn't declare them, so a model that emits its own
+  `thumbnail_url` cannot get it into a response.
+
+**Session 5 — Real book cards, feedback, and replayable recent searches:**
+
+- **Feedback** (`app/routes/feedback_routes.py`, `PUT`/`DELETE`/`GET /api/feedback`):
+  its own module, not an addition to `recommend_routes.py` — every route there is
+  group-scoped, resolves a group id and spends a metered AI call, and feedback is none of
+  those. The `feedback` table carries **no `group_id`**, so a rating is **per-user and
+  account-global**, authorized by authentication alone; and its uniqueness key is
+  **`(user_id, title)`**, which drives the whole design. Writes are upserts on that key
+  (re-rating updates in place; the same rating twice is an idempotent no-op), `DELETE` is
+  a **toggle** (clearing a rating that was never set is **204, not 404**), and `GET` takes
+  the whole card set's titles in one request so five books cost one query. The client must
+  send **Claude's** title, never the Google Books canonical one, or it would open a second
+  row for the same book. Writes share a per-user limiter bucket
+  (`RATE_LIMIT_FEEDBACK`, 120/hr); the read path is not limited because it runs on every
+  render. **Store-only: `claude_service.py` and `_build_system_prompt` are untouched** —
+  a rating changes what a member sees on a card and nothing else.
+- **Recent searches** (`recommend_routes.py` + `db.py`): every successful recommend stores
+  one `recent_searches` row — `group_id`, `user_id`, `prompt`, `result_count`, `watching`
+  (the selected members' display names; the column name is inherited verbatim from the
+  sibling movie app), and `results_json` (the whole result set). **The write can never
+  fail the request** — same philosophy as Session 4's `api_cache` write: the member has
+  already been charged for the call, so a history failure is logged and swallowed, and a
+  test forces it to raise and asserts 200. `GET .../recent-searches` lists the **caller's
+  own** rows newest first (capped at `RECENT_SEARCHES_LIMIT = 10`, no payload);
+  `GET .../recent-searches/{id}` returns the stored results and **spends no AI call** —
+  that is the point of the feature. Both scope by user id AND group id **in the WHERE
+  clause**, so another member's search, or the caller's own in a different group, is a
+  **404** rather than a 403 and leaks nothing about which ids exist. Stored payloads are
+  re-validated through `VerifiedRecommendation` on the way out (a row written by an older
+  version of the app is untrusted input like any other); unusable entries are dropped
+  rather than 500ing history the member cannot re-run for free. Stored results are
+  **deliberately never re-verified** against Google Books — that would spend exactly what
+  the replay exists to save.
+- **Pruning**: after each insert the helper deletes that member's rows for that group
+  beyond `RECENT_SEARCHES_RETAINED` (= limit × 2). Opportunistic and **bucket-local**, the
+  same pattern `rate_limit.py` uses — a global sweep would scan the whole table on a
+  request path a member is waiting on, to reclaim rows that are bounded anyway. The
+  reasoning is in the docstring so a later session doesn't "fix" it into a global sweep.
+- **Indexes**: two added, both additive `CREATE INDEX IF NOT EXISTS` — `idx_feedback_user`
+  and `idx_recent_searches_user_group_created`. **No table or column has ever been
+  altered**, these two tables included: they are used exactly as declared in Session 1.
+- **Frontend** (`static/recommend.html`, `js/recommend.js`, `css/style.css`): the Session 3
+  placeholder is gone. Real cards — cover or a same-footprint CSS placeholder (so a
+  missing image causes no layout shift), **canonical title/author preferred when
+  `verified`** with Claude's as the fallback, page count and published date each omitted
+  entirely when null, and a collapsed description with a show-more toggle. Thumbs up/down
+  per card as an `aria-pressed` pair painted from one batched ratings lookup; updates are
+  optimistic and revert on failure. A collapsed **Recent** panel replays a stored set,
+  made unmistakable by a dashed accent banner naming the saved date, an accent rule down
+  the side of the cards and a changed heading — a member mistaking saved covers for new
+  recommendations is the failure mode this feature has. "Ask again" refills the prompt and
+  reader checkboxes so spending a fresh call stays a deliberate second action. Every node
+  is built with `createElement` and every server-supplied string set via `textContent`;
+  all new styles use the existing custom properties, so both themes are covered with no
+  new hardcoded colors.
+- **Tests**: 48 new (175 total, 94% coverage). The autouse Google Books stub and the
+  asserting fake Anthropic client are untouched — no test can reach a real API. Replay
+  tests assert on the **fake client's call count**, so a replay that secretly re-asked
+  Claude would fail loudly rather than quietly costing money.
 
 ---
 
 ## Pending / on the horizon
 
-- **Next (Session 5):** the real recommendation UI — book cards built from the Google
-  Books metadata now in the response (cover, description, page count), plus thumbs
-  up/down feedback and recent searches. The current `/recommend` page is still the
-  Session 3 placeholder with three fields bolted on.
+- **Next (Session 6):** voting rounds and ballots — 5 candidates, matching
+  `RECOMMENDATION_COUNT`, so a recommendation set can become a ballot unchanged. The
+  `voting_rounds` and `ballots` tables are already forward-declared for it.
 - **Deferred, needs its own session:** the conversational (Claude) profile-discovery
   layer. Split out of Session 3 deliberately — it's a registration/profile UX feature
   that depends on the metering built there but does not need to ship with it. It must
   augment the SAME JSON preference columns, never fork the data model.
-- Later: voting rounds/ballots (5 candidates, matching `RECOMMENDATION_COUNT`), reading
-  lists, cross-group matching, flags review.
+- Later: reading lists, cross-group matching, flags review, and using stored feedback to
+  influence recommendations (the ratings are collected now but deliberately feed nothing;
+  the prompt surface stays frozen ahead of the pre-launch security review).
 - Not yet: password reset, email verification, Stripe/billing, managed auth (Clerk),
   multi-owner support, group renaming/creation in-app, email notifications.
 
 **Housekeeping / known follow-ups (not blocking):**
-- **`GOOGLE_BOOKS_API_KEY` and `API_CACHE_TTL_DAYS` are NOT in `.env.example`** — the
-  session's tooling was blocked from writing to `.env*` files. Both are optional and the
-  app runs correctly without either, but the file is now incomplete. Add:
-  `GOOGLE_BOOKS_API_KEY=` and `API_CACHE_TTL_DAYS=60`. Documented in README meanwhile.
-- **No live smoke test has been run against the real Google Books API.** Every test mocks
-  it. The response shape is modelled on the documented `volumes` envelope; if the real
-  API differs the first live call will show it. Commands are in the session summary.
+- **The Session 5 live smoke test has NOT been run.** Everything is verified by the test
+  suite only. It was not run because uvicorn was not listening on :8000 and the session
+  had no password for the seeded `smoketest@wswrtb.com` owner. The exact commands were
+  handed to Adam in the session summary; the browser-visual parts (cards, dark mode,
+  description toggle) need a human either way.
+- **`.env` and `.env.example` both contain DUPLICATED entries** for
+  `GOOGLE_BOOKS_API_KEY` and `API_CACHE_TTL_DAYS` — each appears twice, and in `.env` the
+  first `GOOGLE_BOOKS_API_KEY` is empty while the second is set (python-dotenv takes the
+  last, so the key does work today). In `.env.example` the duplication is an
+  **uncommitted working-tree edit** that Session 5 deliberately did NOT commit: the
+  session prompt states those two variables are omitted from the committed template on
+  purpose. Decide whether to keep them out and discard that edit, or put them in once.
+  Either way the double entries should go — they are one careless append from confusion.
 - `pytest-cov` is used for the coverage report but is not pinned in `requirements.txt`
   (production deps only). Add a `requirements-dev.txt` if/when coverage joins CI.
 - **At deploy time (Session 7):** implement `X-Forwarded-For` handling in
@@ -333,22 +336,19 @@ _Sessions 1–4 + the pre-Session-3 hardening pass complete. 127 tests passing, 
   real domain. Flagged in code.
 - `google_books` opens a fresh `httpx.AsyncClient` per lookup (up to five per request)
   rather than reusing a pooled one. Deliberate — a module-level client is shared in-process
-  state, which this codebase avoids — and negligible at book-club scale. Revisit only if
-  recommendation latency ever matters.
-- **A `GOOGLE_BOOKS_API_KEY` is effectively REQUIRED in practice.** Verified live from
-  this dev box at the end of Session 4: keyless requests returned
-  `429 Quota exceeded ... 'Queries per day' ... for consumer 'project_number:…'` — the
-  anonymous quota is a shared Google project, and it was already exhausted by other
-  callers. The app handles this correctly (a 429 is an outage, so books come back
-  `verified: false` rather than being dropped), but that means verification is silently
-  OFF without a key. Create a key in a Google Cloud project with the Books API enabled
-  and set `GOOGLE_BOOKS_API_KEY`. The optional-key design stays — it's the right
-  behaviour for a missing key — but do not expect keyless to work.
+  state, which this codebase avoids — and negligible at book-club scale.
+- **A `GOOGLE_BOOKS_API_KEY` is effectively REQUIRED in practice.** Verified live at the
+  end of Session 4: keyless requests returned `429 Quota exceeded ... 'Queries per day'`
+  — the anonymous quota is a shared Google project and was already exhausted. The app
+  handles this correctly (a 429 is an outage, so books come back `verified: false` rather
+  than being dropped), but that means verification is silently OFF without a key.
 - `api_cache` rows are never pruned, only overwritten on re-fetch. One row per distinct
-  (title, author) ever recommended — bounded in practice, revisit only if it grows.
+  (title, author) ever recommended — bounded in practice.
+- `recent_searches` is pruned per (member, group) on insert; `feedback` is **never**
+  pruned — a member's ratings are meant to be permanent, and the row count is bounded by
+  how many distinct books they have ever been shown.
 - Rate-limit cleanup is per-bucket and opportunistic; a bucket that goes permanently
-  silent leaves a few stale rows. Negligible at book-club scale — add a global sweep only
-  if the table ever grows unexpectedly.
+  silent leaves a few stale rows. Negligible at book-club scale.
 - **AI pricing constants are hardcoded** in `claude_service.py`. If Anthropic changes
   `claude-haiku-4-5` pricing (or `CLAUDE_MODEL` is pointed at a different model) and the
   constants aren't updated, `est_cost_usd` silently stops reflecting real spend and the
@@ -359,11 +359,13 @@ _Sessions 1–4 + the pre-Session-3 hardening pass complete. 127 tests passing, 
   an inherent prompt-injection surface. Bounded today by invite-gated membership plus
   schema validation and server-side filtering of the output. Worth revisiting if signup
   ever opens up.
+- **Replayed results go stale by design** — a cover URL can rot and a description can
+  change, and nothing re-checks them. That is the cost saving working as intended, and it
+  is why the saved-date marker on a replayed set is mandatory rather than decorative.
 - Anthropic **structured outputs** (`output_config.format`) are supported on
   `claude-haiku-4-5` and would make JSON parsing near-bulletproof. Not adopted in Session 3
   (defensive fence-stripping + Pydantic was the specified approach); a cheap hardening win.
 
----
 
 ## Blocked / Needs Adam
 

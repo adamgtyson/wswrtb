@@ -2,6 +2,13 @@
 
 One line per session. Newest first.
 
+- **Session 5** — Real book cards, feedback, and replayable recent searches: the two
+  forward-declared tables wired up as declared (two additive indexes, no schema change),
+  `PUT`/`DELETE`/`GET /api/feedback` upserting on the existing `(user_id, title)` key with
+  a toggle-style delete and a per-user rate limit, stored recent searches whose replay
+  spends no AI call and whose write can never fail the request, and a real card UI with
+  covers, canonical titles, description toggles and an unmistakable saved-results marker.
+  175 tests, 94% coverage.
 - **Session 4** — Google Books verification: a single-chokepoint lookup service with
   0.8 word-overlap matching on title AND author, the forward-declared `api_cache` table
   wired up (60-day TTL, no schema change), unverifiable books dropped and replaced
