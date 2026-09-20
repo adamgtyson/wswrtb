@@ -22,7 +22,6 @@
     <h1 id="group-name">Ask for a book</h1>
     <p class="subtitle">
       Pick who's reading, describe what you're after, and get five suggestions.
-      <span class="hint">(Rough placeholder — proper book cards come later.)</span>
     </p>
 
     <!-- Shown only when the user belongs to more than one group. -->
@@ -48,9 +47,33 @@
       </form>
     </section>
 
+    <!-- Past searches. Collapsed by default; opening one replays its stored results
+         without spending another AI call. -->
+    <section class="card hidden" id="recent-card">
+      <div class="panel-head">
+        <h2 class="section-title" style="margin-top:0;">Recent</h2>
+        <button
+          id="recent-toggle"
+          class="ghost small"
+          type="button"
+          aria-expanded="false"
+          aria-controls="recent-list"
+        >Show</button>
+      </div>
+      <ul class="list hidden" id="recent-list"></ul>
+    </section>
+
     <section class="card hidden" id="results-card">
-      <h2 class="section-title" style="margin-top:0;">Recommendations</h2>
-      <ul class="list" id="results"></ul>
+      <!-- Shown only for a replayed set. A saved result set looks identical to a fresh
+           one, so this banner and its date are what stop a member mistaking one for
+           the other. -->
+      <div class="replay-banner hidden" id="replay-banner">
+        <span id="replay-text"></span>
+        <button id="ask-again" class="ghost small" type="button">Ask again</button>
+      </div>
+
+      <h2 class="section-title" id="results-title" style="margin-top:0;">Recommendations</h2>
+      <div class="books" id="results"></div>
     </section>
   </div>
 
