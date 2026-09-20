@@ -152,6 +152,15 @@ _INDEXES = [
        ON ai_usage(user_id, created_at)""",
     """CREATE INDEX IF NOT EXISTS idx_ai_usage_created
        ON ai_usage(created_at)""",
+    # Session 5: feedback is looked up as "this user's ratings, for these titles" on every
+    # render of a result set. The UNIQUE(user_id, title) constraint already indexes the
+    # upsert's conflict target; this covers the read.
+    """CREATE INDEX IF NOT EXISTS idx_feedback_user
+       ON feedback(user_id)""",
+    # Session 5: every recent-searches read is "this user's rows in this group, newest
+    # first", and the prune after each insert walks the same ordering.
+    """CREATE INDEX IF NOT EXISTS idx_recent_searches_user_group_created
+       ON recent_searches(user_id, group_id, created_at)""",
 ]
 
 # Columns that store JSON. Parsed on read, dumped on write.
@@ -616,6 +625,214 @@ async def set_api_cache(cache_key: str, payload: dict, ttl_days: int) -> None:
             ),
         )
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# Feedback (Session 5)
+#
+# `feedback` is per-user and account-GLOBAL: the table carries no group_id, and its
+# uniqueness key is (user_id, title). A rating therefore follows the member across every
+# group they belong to, and it is keyed on the title Claude produced rather than on
+# google_books_id — so a book rated once stays rated even if a later recommendation
+# resolves it to a different volume. Store-only this session: nothing reads these rows
+# back into a prompt.
+# ---------------------------------------------------------------------------
+async def upsert_feedback(
+    *,
+    user_id: int,
+    title: str,
+    author: str | None,
+    google_books_id: str | None,
+    rating: int,
+) -> None:
+    """Insert or update one user's rating for a title.
+
+    Upserts on the table's existing UNIQUE(user_id, title) constraint, so re-rating a
+    book updates the row in place instead of raising, and submitting the same rating
+    twice is a no-op write rather than an error. `author` and `google_books_id` are
+    refreshed only when the caller supplies them (COALESCE), so a later rating from a
+    payload missing that metadata cannot blank out what an earlier one recorded.
+    """
+    async with connect() as db:
+        await db.execute(
+            """INSERT INTO feedback (user_id, title, author, google_books_id, rating)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(user_id, title) DO UPDATE SET
+                 rating = excluded.rating,
+                 author = COALESCE(excluded.author, feedback.author),
+                 google_books_id =
+                   COALESCE(excluded.google_books_id, feedback.google_books_id)""",
+            (user_id, title, author, google_books_id, rating),
+        )
+        await db.commit()
+
+
+async def delete_feedback(user_id: int, title: str) -> bool:
+    """Delete a user's rating for a title. Returns True if a row was actually removed.
+
+    Deleting a rating that was never set is not an error — the endpoint is a toggle, not
+    a resource — so the route ignores the return value and answers 204 either way.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            "DELETE FROM feedback WHERE user_id = ? AND title = ?", (user_id, title)
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+async def get_feedback_for_titles(user_id: int, titles: list[str]) -> dict[str, int]:
+    """Return {title: rating} for whichever of `titles` this user has rated.
+
+    One query for a whole result set rather than one request per card. The title list is
+    bound as a single JSON parameter and expanded by SQLite's json_each — no placeholder
+    string is built in Python, so the query text stays a constant like every other in
+    this module.
+    """
+    if not titles:
+        return {}
+    async with connect() as db:
+        async with db.execute(
+            """SELECT title, rating FROM feedback
+               WHERE user_id = ? AND title IN (SELECT value FROM json_each(?))""",
+            (user_id, json.dumps(titles)),
+        ) as cur:
+            rows = await cur.fetchall()
+    return {row[0]: row[1] for row in rows}
+
+
+# ---------------------------------------------------------------------------
+# Recent searches (Session 5)
+#
+# One row per successful recommendation request, storing the full result set so a member
+# can re-open it without spending another Claude call — that replay is the entire point
+# of the feature, so `results_json` is written eagerly and never re-verified on read.
+# `watching` is inherited verbatim from the sibling movie app; here it holds the display
+# names of the members who were reading.
+# ---------------------------------------------------------------------------
+async def record_recent_search(
+    *,
+    user_id: int,
+    group_id: int,
+    prompt: str,
+    result_count: int,
+    watching: list[str],
+    results: list[dict],
+    keep: int,
+) -> int:
+    """Store one search and prune this user's older rows for this group. Returns the id.
+
+    The prune is opportunistic and bucket-local — it trims only the (user, group) pair
+    just written, the same pattern services/rate_limit.py uses on its own bucket. That is
+    deliberate: a global sweep would have to scan the whole table on a request path that
+    a member is waiting on, to reclaim rows that are bounded anyway (`keep` per user per
+    group). Do not replace this with a table-wide cleanup without a reason to.
+
+    Callers must treat a failure here as non-fatal: history is not worth failing a
+    request the member has already been charged an AI call for.
+    """
+    async with connect() as db:
+        cur = await db.execute(
+            """INSERT INTO recent_searches
+                 (group_id, user_id, prompt, result_count, watching, results_json)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                group_id,
+                user_id,
+                prompt,
+                result_count,
+                json.dumps(watching),
+                json.dumps(results),
+            ),
+        )
+        search_id = cur.lastrowid
+        await db.execute(
+            """DELETE FROM recent_searches
+               WHERE user_id = ? AND group_id = ? AND id NOT IN (
+                   SELECT id FROM recent_searches
+                   WHERE user_id = ? AND group_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?
+               )""",
+            (user_id, group_id, user_id, group_id, keep),
+        )
+        await db.commit()
+    return search_id
+
+
+async def list_recent_searches(user_id: int, group_id: int, limit: int) -> list[dict]:
+    """Return the user's own recent searches in this group, newest first.
+
+    `results_json` is deliberately NOT selected: the list is a menu, and the stored
+    payloads are fetched one at a time by get_recent_search when a member replays one.
+    `watching` is parsed back into a list; a corrupt value degrades to an empty list
+    rather than breaking the whole listing.
+    """
+    async with connect() as db:
+        async with db.execute(
+            """SELECT id, prompt, result_count, watching, created_at
+               FROM recent_searches
+               WHERE user_id = ? AND group_id = ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT ?""",
+            (user_id, group_id, limit),
+        ) as cur:
+            rows = await cur.fetchall()
+
+    searches = []
+    for row in rows:
+        try:
+            watching = json.loads(row[3])
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Unparseable recent_searches.watching on row %s", row[0])
+            watching = []
+        searches.append(
+            {
+                "id": row[0],
+                "prompt": row[1],
+                "result_count": row[2],
+                "watching": watching if isinstance(watching, list) else [],
+                "created_at": row[4],
+            }
+        )
+    return searches
+
+
+async def get_recent_search(search_id: int, user_id: int, group_id: int) -> dict | None:
+    """Return one stored search including its results, or None.
+
+    The owning user id and group id are part of the WHERE clause rather than checked
+    afterwards, so another member's row (or the caller's own row in a different group) is
+    simply not found — a replay cannot read across users or tenants.
+    """
+    async with connect() as db:
+        async with db.execute(
+            """SELECT id, prompt, result_count, watching, results_json, created_at
+               FROM recent_searches
+               WHERE id = ? AND user_id = ? AND group_id = ?""",
+            (search_id, user_id, group_id),
+        ) as cur:
+            row = await cur.fetchone()
+    if row is None:
+        return None
+
+    try:
+        watching = json.loads(row[3])
+    except (json.JSONDecodeError, TypeError):
+        watching = []
+    try:
+        results = json.loads(row[4]) if row[4] else []
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("Unparseable recent_searches.results_json on row %s", row[0])
+        results = []
+    return {
+        "id": row[0],
+        "prompt": row[1],
+        "result_count": row[2],
+        "watching": watching if isinstance(watching, list) else [],
+        "results": results if isinstance(results, list) else [],
+        "created_at": row[5],
+    }
 
 
 # ---------------------------------------------------------------------------
