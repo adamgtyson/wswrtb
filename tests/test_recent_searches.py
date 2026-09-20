@@ -402,3 +402,59 @@ def test_pruning_does_not_touch_another_members_history(client, club, fake_claud
     )
     assert [r[0] for r in reader_rows] == ["Reader keeps this"]
     assert len(owner_rows) == 2
+
+
+# ---------------------------------------------------------------------------
+# Corrupt stored JSON degrades rather than 500s
+# ---------------------------------------------------------------------------
+def _corrupt_watching(value):
+    """Overwrite the stored `watching` value on every recent_searches row."""
+
+    async def go():
+        async with db.connect() as conn:
+            await conn.execute("UPDATE recent_searches SET watching = ?", (value,))
+            await conn.commit()
+
+    _run(go())
+
+
+def _corrupt_results(value):
+    """Overwrite the stored `results_json` payload on every recent_searches row."""
+
+    async def go():
+        async with db.connect() as conn:
+            await conn.execute("UPDATE recent_searches SET results_json = ?", (value,))
+            await conn.commit()
+
+    _run(go())
+
+
+def test_unparseable_watching_degrades_to_empty(client, club, fake_claude):
+    """A corrupt `watching` value costs that row its reader list, not the whole listing."""
+    fake_claude(claude_response(FIVE))
+    _ask(client, club["group_id"], [club["owner_id"]])
+    _corrupt_watching("not json at all")
+
+    res = client.get(f"/api/groups/{club['group_id']}/recent-searches")
+
+    assert res.status_code == 200
+    assert res.json()["searches"][0]["watching"] == []
+    assert res.json()["searches"][0]["prompt"] == "Something twisty and cold"
+
+
+def test_unparseable_stored_results_replay_as_empty(client, club, fake_claude):
+    """A corrupt payload is reported as an empty saved set, never a 500."""
+    fake_claude(claude_response(FIVE))
+    _ask(client, club["group_id"], [club["owner_id"]])
+    search_id = client.get(f"/api/groups/{club['group_id']}/recent-searches").json()[
+        "searches"
+    ][0]["id"]
+    _corrupt_results("{ broken")
+    _corrupt_watching("also broken")
+
+    res = client.get(f"/api/groups/{club['group_id']}/recent-searches/{search_id}")
+
+    assert res.status_code == 200
+    assert res.json()["recommendations"] == []
+    assert res.json()["result_count"] == 0
+    assert res.json()["watching"] == []
