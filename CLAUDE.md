@@ -83,7 +83,8 @@ tests/                 pytest suite (onboarding, group management, hardening, AI
   ("That invite code is invalid or full." / "Invalid email or password.").
 - **Invite redemption is atomic** — the seat check-and-decrement and the account
   creation happen in a single transaction so concurrent redemptions cannot overfill.
-- **Dev on "the-rig" (this dev server). Never edit on the Droplet.** Production is a
+- **Dev on `tyserver` (the dev server; it appears as "the-rig" in Cowork). Never edit
+  on the Droplet.** Production is a
   DigitalOcean Droplet; deploys are pulls, not in-place edits. Keep everything portable
   Ubuntu-standard. Local dev only this session — do not deploy.
 - Every function gets a docstring. No magic strings/numbers in logic — use module
@@ -97,6 +98,13 @@ tests/                 pytest suite (onboarding, group management, hardening, AI
 - **All Google Books access goes through `app/services/google_books.py`.** Same
   single-chokepoint rule, same reason: one place to cache, throttle, or swap the
   provider, and one place to audit.
+- **Commit directly to `main`, and PUSH before the session ends.** No branch/PR workflow
+  — there's no CI gate or second reviewer to make one useful here. This bullet was
+  dropped in the Session 5 doc rewrite and is restored deliberately so it stops being
+  re-litigated. The push half is not optional: Session 5 sat committed-but-unpushed for
+  two days, so seven commits of finished work lived on exactly one ageing laptop while
+  the GitHub-synced project context silently showed Session 4 state. `git push origin
+  main` is part of finishing, not part of deploying.
 
 ### Runtime / tooling notes
 
@@ -134,7 +142,9 @@ single-use `invites` table. One invite code maps to one group.
 
 ## Current Build State
 
-_Sessions 1–5 + the pre-Session-3 hardening pass complete. 175 tests passing, 94% coverage._
+_Sessions 1–5 + the pre-Session-3 hardening pass complete. 175 tests passing, 94%
+coverage. Live smoke-tested end to end on 2026-09-21 against the real Anthropic and
+Google Books APIs._
 
 **Session 1 — Scaffold + Code-Gated Onboarding:**
 
@@ -296,6 +306,17 @@ _Sessions 1–5 + the pre-Session-3 hardening pass complete. 175 tests passing, 
   asserting fake Anthropic client are untouched — no test can reach a real API. Replay
   tests assert on the **fake client's call count**, so a replay that secretly re-asked
   Claude would fail loudly rather than quietly costing money.
+- **Live smoke test verified (2026-09-21)**, two days after the code landed. Five real
+  cards rendered with covers, canonical titles and page counts; the description toggle,
+  dark mode and the saved-results banner all read correctly. The feedback upsert was
+  confirmed at the DB level — a thumbs-up then thumbs-down on the same book left
+  **exactly one `feedback` row** at `rating = -1`, proving the `(user_id, title)` key is
+  being hit and the client sends Claude's title rather than the canonical one. The replay
+  spends nothing: `SELECT COUNT(*) FROM ai_usage` was identical either side of clicking a
+  Recent entry. Two asks produced exactly two `ai_usage` rows 79 seconds apart (293 input
+  tokens each, ~$0.0023 per call) — no top-up retry fired, and the identical prompt size
+  across a rate-then-re-ask sequence is incidental confirmation that **feedback is not
+  leaking into the prompt**, as specified.
 
 ---
 
@@ -315,19 +336,31 @@ _Sessions 1–5 + the pre-Session-3 hardening pass complete. 175 tests passing, 
   multi-owner support, group renaming/creation in-app, email notifications.
 
 **Housekeeping / known follow-ups (not blocking):**
-- **The Session 5 live smoke test has NOT been run.** Everything is verified by the test
-  suite only. It was not run because uvicorn was not listening on :8000 and the session
-  had no password for the seeded `smoketest@wswrtb.com` owner. The exact commands were
-  handed to Adam in the session summary; the browser-visual parts (cards, dark mode,
-  description toggle) need a human either way.
-- **`.env` and `.env.example` both contain DUPLICATED entries** for
-  `GOOGLE_BOOKS_API_KEY` and `API_CACHE_TTL_DAYS` — each appears twice, and in `.env` the
-  first `GOOGLE_BOOKS_API_KEY` is empty while the second is set (python-dotenv takes the
-  last, so the key does work today). In `.env.example` the duplication is an
-  **uncommitted working-tree edit** that Session 5 deliberately did NOT commit: the
-  session prompt states those two variables are omitted from the committed template on
-  purpose. Decide whether to keep them out and discard that edit, or put them in once.
-  Either way the double entries should go — they are one careless append from confusion.
+- **Google Books can match a real volume that has no cover art.** Seen live on
+  2026-09-21: Claude returned "The Expanse: Leviathan Wakes" (it prefixed the series name
+  onto a single book), the 0.8 word-containment matcher correctly tolerated the extra
+  words — exactly what it was built for — and matched volume `hGAb0gEACAAJ`, a
+  metadata-only catalog record with no `imageLinks`. Result: `verified: true`, no cover,
+  and the card's placeholder did its job. **Cheap future win:** among confident matches,
+  prefer a volume that actually has `imageLinks` before taking the first. No schema change
+  and no extra API call — the candidates are already in the response.
+- **Claude sometimes decorates a title with its series name** ("The Expanse: Leviathan
+  Wakes" rather than "Leviathan Wakes"). Harmless for matching, but it is what steers a
+  lookup onto a thin edition record, and it means the stored `feedback.title` carries the
+  decorated string. Worth one line in the system prompt asking for a single published
+  volume under its own title — but the prompt surface stays **frozen** until the
+  pre-launch security review has run.
+- **RESOLVED 2026-09-21 — `.env` duplication cleaned up.** `.env` had two entries each
+  for `GOOGLE_BOOKS_API_KEY` (first empty, second set) and `API_CACHE_TTL_DAYS`; the app
+  worked only because python-dotenv takes the last occurrence. The shadowed earlier lines
+  were deleted. The `.env.example` working-tree edit was **discarded**: those two
+  variables stay out of the committed template by Adam's explicit decision — do not add
+  them back, and do not file their absence as drift. The committed template's only
+  Session 5 change is the `RATE_LIMIT_FEEDBACK` pair.
+- **An explicit "do not do X" in a session prompt is weak protection.** Session 5's prompt
+  said in two places not to add those variables to `.env.example`; the session appended
+  them anyway (twice). Enforce this class of constraint with a do-not-touch file list plus
+  a clean `git status` in the definition of done, not with prose.
 - `pytest-cov` is used for the coverage report but is not pinned in `requirements.txt`
   (production deps only). Add a `requirements-dev.txt` if/when coverage joins CI.
 - **At deploy time (Session 7):** implement `X-Forwarded-For` handling in
